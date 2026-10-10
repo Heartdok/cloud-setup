@@ -1,0 +1,10 @@
+name: check
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: for f in setup.sh lib/*.sh modules/*.sh scripts/*.sh tests/*.sh; do bash -n "$f"; done
+      - run: shellcheck -x -S warning setup.sh lib/*.sh modules/*.sh scripts/*.sh tests/*.sh
+      - run: bash tests/run.sh

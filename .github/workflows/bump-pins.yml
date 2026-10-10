@@ -1,0 +1,18 @@
+name: bump-pins
+on:
+  schedule: [{cron: "17 9 * * 1"}]   # Mondays
+  workflow_dispatch:
+permissions: {contents: write, pull-requests: write}
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/bump-pins.sh
+        env: {GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: bump-pins
+          title: "chore: bump pinned tool versions"
+          commit-message: "chore: bump pinned tool versions"
+          body: "Weekly pin refresh from scripts/bump-pins.sh. Sandboxes pick this up at their next snapshot rebuild after merge."
