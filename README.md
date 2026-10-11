@@ -32,11 +32,16 @@ From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]`.
   A file that is missing or still says `running:` tells a session that the build-time setup did not
   run or was cut off, so a session-time layer can repair what is missing.
 
-## Finding the project
-The first of these that contains `scripts/cloud/manifest` wins: the git toplevel of the current
-directory, the current directory, then each directory matching `/home/*/*` and `/root/*` (override
-with `CLOUD_SETUP_ROOTS`). Without a manifest anywhere, the first git repository found, else the
-current directory, gets `core` only. `--repo DIR` (or `CLOUD_SETUP_REPO`) skips the search.
+## Finding the projects
+Every project with anything in `scripts/cloud/` (`manifest`, `secrets.manifest.json`,
+`setup.local.sh`, `session.pre.sh`, `session.local.sh`, `assets`) takes part, in this order: the git
+toplevel of the current directory, the current directory, then each directory matching `/home/*/*`
+and `/root/*` (override with `CLOUD_SETUP_ROOTS`). A multi-repo sandbox (several projects cloned side
+by side) installs the union of their manifests and runs each `setup.local.sh` (the step is `local`
+for the first project, `local:<name>` for the others). A module marked `scope="repo"` (`python`,
+`node`) runs in each project that lists it. The first project's Bun pin wins. With none of them,
+the first git repository found, else the current directory, gets `core` only. `--repo DIR`
+(repeatable; or `CLOUD_SETUP_REPO`) skips the search.
 
 ## The manifest
 `scripts/cloud/manifest` in the project: module names separated by spaces or newlines, `#` starts a

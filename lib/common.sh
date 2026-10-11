@@ -65,10 +65,34 @@ discover_repo() {
   echo "${first:-$PWD}"
 }
 
+# Every project repo the sandbox holds that has anything in scripts/cloud/ (a multi-repo thread
+# clones several side by side): the discover_repo candidates in order, deduplicated, one per line.
+repo_contributes() {
+  local f
+  for f in manifest secrets.manifest.json setup.local.sh session.pre.sh session.local.sh assets; do
+    [ -f "$1/scripts/cloud/$f" ] && return 0
+  done
+  return 1
+}
+discover_repos() {
+  local d top roots="${CLOUD_SETUP_ROOTS:-/home/*/* /root/*}"
+  local -a cands=()
+  top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" && cands+=("$top")
+  cands+=("$PWD")
+  # shellcheck disable=SC2206 # the roots are globs
+  cands+=($roots)
+  for d in "${cands[@]}"; do
+    [ -d "$d" ] && repo_contributes "$d" && (cd "$d" && pwd -P)
+  done | awk '!seen[$0]++'
+}
+
 # Module registry: every modules/<name>.sh is a module; there is no other list.
 module_exists() { [ -f "$CLOUD_SETUP_HOME/modules/$1.sh" ]; }
 known_modules() { (cd "$CLOUD_SETUP_HOME/modules" && ls ./*.sh) | sed 's|^\./||; s|\.sh$||' | grep -vx core | sort; }
 module_description() { sed -n '1s/^# [a-z0-9-]* — //p' "$CLOUD_SETUP_HOME/modules/$1.sh" 2>/dev/null; }
+# scope="repo" (python, node): the module works on one repo's files, so a multi-repo setup runs it
+# in each repo that lists it.
+module_scope() { sed -n 's/^scope="\(.*\)"/\1/p' "$CLOUD_SETUP_HOME/modules/$1.sh" 2>/dev/null | tail -1; }
 requires_of() { sed -n 's/^requires="\(.*\)"/\1/p' "$CLOUD_SETUP_HOME/modules/$1.sh" 2>/dev/null; }
 
 # Manifest: whitespace/newline separated module names, '#' comments.

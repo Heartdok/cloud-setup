@@ -37,7 +37,7 @@ echo 'setup() { sleep 60; }' > "$F/modules/slow.sh"
 echo 'setup() { true; }' > "$F/modules/zlate.sh"
 printf 'good bad dies nope\n' > "$F/repo/scripts/cloud/manifest"
 printf 'echo local-ran; exit 1\n' > "$F/repo/scripts/cloud/setup.local.sh"
-run() { (cd "$F/repo" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_BUDGET="${BUDGET:-240}" bash "$F/setup.sh" "$@"); }
+run() { (cd "$F/repo" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_ROOTS="${ROOTS:-$t/noroots/*}" CLOUD_SETUP_BUDGET="${BUDGET:-240}" bash "$F/setup.sh" "$@"); }
 out="$(run)"; rc=$?
 res="$(cat "$F/home/.local/share/cloud-env/setup-result" 2>/dev/null)"
 [ $rc = 0 ] && ok "exits 0 although steps fail" || no "exit code $rc"
@@ -51,6 +51,27 @@ grep -q 'no manifest' "$F/home/.local/share/cloud-env/setup-result" && ok "no ma
 printf 'good\n' > "$F/repo/scripts/cloud/manifest"; rm "$F/repo/scripts/cloud/setup.local.sh"; run >/dev/null
 [ "$(cut -c1-5 "$F/home/.local/share/cloud-env/setup-result")" = base= ] && ! grep -q ERROR "$F/home/.local/share/cloud-env/setup-result" \
   && ok "clean run: base=<sha>, no ERROR" || no "clean: $(cat "$F/home/.local/share/cloud-env/setup-result")"
+# Multi-repo: every repo with scripts/cloud/ under the roots joins; modules merge, each repo's
+# setup.local.sh runs ("local:<name>" past the first), a repo-scoped module runs in each repo listing it.
+mkdir -p "$F/roots/two/scripts/cloud" "$F/roots/bare"
+printf 'good\n' > "$F/repo/scripts/cloud/manifest"; printf 'zlate scoped\n' > "$F/roots/two/scripts/cloud/manifest"
+printf 'echo local-two-ran\n' > "$F/roots/two/scripts/cloud/setup.local.sh"
+printf 'echo local-one-ran\n' > "$F/repo/scripts/cloud/setup.local.sh"
+printf 'scope="repo"\nsetup() { echo "scoped-in $REPO"; }\n' > "$F/modules/scoped.sh"
+out="$(ROOTS="$F/roots/*" run)"; res="$(cat "$F/home/.local/share/cloud-env/setup-result")"
+log="$F/home/.local/share/cloud-env/setup.log"
+grep -q 'core=ok good=ok scoped=ok zlate=ok local=ok local:two=ok' <<<"$out" && ! grep -q ERROR <<<"$res" \
+  && ok "multi-repo: modules merged, each repo's setup.local.sh, clean result" || no "multi-repo: $out / $res"
+grep -q "scoped-in $(cd "$F/roots/two" && pwd -P)\$" "$log" && ! grep -q "scoped-in $F/repo" "$log" \
+  && ok "multi-repo: repo-scoped module runs in the repo that lists it" || no "multi-repo scope: $(grep scoped-in "$log")"
+grep -q "repos=$(cd "$F/repo" && pwd -P) $(cd "$F/roots/two" && pwd -P) " "$log" && ok "multi-repo: \$PWD's repo first, bare dir skipped" || no "multi-repo order: $(head -1 "$log")"
+printf 'nope2\n' >> "$F/roots/two/scripts/cloud/manifest"; ROOTS="$F/roots/*" run >/dev/null
+grep -q 'unknown module(s) in two: nope2' "$F/home/.local/share/cloud-env/setup-result" && ok "multi-repo: unknown module names its repo" || no "multi-repo unknown: $(cat "$F/home/.local/share/cloud-env/setup-result")"
+rm -rf "$F/roots" "$F/modules/scoped.sh" "$F/repo/scripts/cloud/setup.local.sh"
+d2() { (cd "$1" && CLOUD_SETUP_ROOTS="$2" bash -c ". '$here/lib/common.sh'; discover_repos" | tr '\n' ' '); }
+mkdir -p "$t/dr/a/scripts/cloud" "$t/dr/b/scripts/cloud" "$t/dr/c"; touch "$t/dr/a/scripts/cloud/session.local.sh" "$t/dr/b/scripts/cloud/secrets.manifest.json"
+[ "$(d2 "$t/dr/b" "$t/dr/*")" = "$(cd "$t/dr/b" && pwd -P) $(cd "$t/dr/a" && pwd -P) " ] && ok "discover_repos: \$PWD first, any scripts/cloud file counts, deduplicated" || no "discover_repos: $(d2 "$t/dr/b" "$t/dr/*")"
+
 if command -v timeout >/dev/null; then
   printf 'slow zlate\n' > "$F/repo/scripts/cloud/manifest"; s=$(date +%s)
   out="$(BUDGET=12 run)"; rc=$?; d=$(( $(date +%s) - s ))
