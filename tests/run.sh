@@ -4,7 +4,7 @@
 set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0; ok() { echo "  ✓ $*"; }; no() { echo "  ✗ $*"; fail=1; }
-t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
+t="$(mktemp -d)"; trap 'chmod -R u+w "$t" 2>/dev/null; rm -rf "$t"' EXIT
 lib() { bash -c ". '$here/lib/common.sh'; $1"; }
 unset OP_CONNECT_HOST OP_CONNECT_TOKEN   # the session-layer hand-off is tested on purpose, below
 
@@ -226,5 +226,84 @@ printf '#!/bin/sh\nexit 1\n' > "$NR/fake/sudo"; chmod +x "$NR/fake/sudo"
 printf '#!/bin/sh\n[ "$1" = -n ] && shift; exec "$@"\n' > "$NR/fake/sudo"
 nr -c ". '$here/lib/common.sh'; apt_install curl absent" && grep -q 'install .*absent' "$NR/apt.log" \
   && ok "passwordless sudo: apt_install still uses apt" || no "sudo apt path: $(cat "$NR/apt.log" 2>/dev/null)"
+
+
+# A writable HOME is what Claude Code (root) and Cursor (a user) have: nothing about it may change.
+# Every path, the SessionStart hook, ~/.cloud-env.source and the summary line are as before, even
+# with the read-only-HOME knobs set.
+rm -f "$NR/fake/sudo" "$NR/fake/dpkg-query"   # back to no sudo at all, as on Codex Cloud
+( . "$here/pins.env"; r="$NR/rel/jq-$JQ_PIN"   # and the jq checksum list the refusal test spoiled
+  echo "$(if command -v sha256sum >/dev/null; then sha256sum "$r/jq-linux-$narch"; else shasum -a 256 "$r/jq-linux-$narch"; fi | cut -d' ' -f1)  jq-linux-$narch" > "$r/sha256sum.txt" )
+WH="$t/wh"; mkdir -p "$WH/home" "$WH/ws" "$WH/fake"
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }; exec %s "$@"\n' "$realid" > "$WH/fake/id"; chmod +x "$WH/fake/id"
+paths='echo "$BIN|$OPT|$SHARE|$RO_HOME|$CLOUD_PREFIX|$IHOME"'
+knobs=(CLOUD_SETUP_PREFIX="$WH/ws/p" CLOUD_SETUP_WORKSPACE="$WH/ws")
+[ "$(env "${knobs[@]}" HOME="$WH/home" PATH="$WH/fake:$PATH" bash -c ". '$here/lib/common.sh' 2>/dev/null; $paths")" = "/usr/local/bin|/opt|$WH/home/.local/share/cloud-env|0||$WH/home" ] \
+  && ok "writable HOME, root: /usr/local/bin, /opt, ~/.local/share/cloud-env as before (prefix knobs ignored)" || no "root paths: $(env "${knobs[@]}" HOME="$WH/home" PATH="$WH/fake:$PATH" bash -c ". '$here/lib/common.sh' 2>/dev/null; $paths")"
+[ "$(nr -c "export ${knobs[*]}; HOME='$WH/home'; . '$here/lib/common.sh'; $paths")" = "$WH/home/.local/bin|$WH/home/.local/opt|$WH/home/.local/share/cloud-env|0||$WH/home" ] \
+  && ok "writable HOME, plain user: ~/.local as before (prefix knobs ignored)" || no "user paths: $(nr -c "export ${knobs[*]}; HOME='$WH/home'; . '$here/lib/common.sh'; $paths")"
+dh() { eval "$(sed -n '/^ro_prefix() {/,/^}/p;/^default_home() {/,/^}/p' "$here/setup.sh")"; default_home; }
+[ "$(export "${knobs[@]}"; HOME="$WH/home" PATH="$WH/fake:$PATH" dh)" = /opt/cloud-setup ] && [ "$(export "${knobs[@]}"; HOME="$WH/home" dh)" = "$WH/home/.local/share/cloud-setup" ] \
+  && ok "writable HOME: the installer's own home is /opt/cloud-setup (root) or ~/.local/share/cloud-setup, as before" || no "default_home with a writable HOME"
+[ ! -e "$WH/ws/.cloud" ] && [ ! -e "$WH/ws/p" ] && ok "writable HOME: nothing created under the workspace or CLOUD_SETUP_PREFIX" || no "writable HOME wrote a prefix"
+printf 'good\n' > "$F/repo/scripts/cloud/manifest"; rm -f "$F/repo/scripts/cloud/setup.local.sh"
+out="$(cd "$F/repo" && env -u CLOUD_SETUP_HOME "${knobs[@]}" HOME="$F/home" CLOUD_SETUP_ROOTS="$F/none/*" bash "$F/setup.sh")"
+grep -Eqx "cloud-setup: core=ok good=ok secs=[0-9]+ log=$F/home/.local/share/cloud-env/setup.log" <<<"$out" && ! grep -q 'prefix=' <<<"$out" \
+  && [ "$(cut -c1-5 "$F/home/.local/share/cloud-env/setup-result")" = base= ] && [ ! -e "$WH/ws/.cloud" ] && [ ! -e "$WH/ws/p" ] \
+  && ok "writable HOME: summary line unchanged (no prefix=), result in ~/.local/share/cloud-env" || no "writable HOME summary: $out"
+HL="$t/layer2"; mkdir -p "$HL"; rm -f "$t/calls" "$F/home/.cloud-env.source"
+printf 'echo "stub prefix=${CLOUD_SETUP_PREFIX:-unset}" >> "%s/calls"; echo "clone %s" > "$HOME/.cloud-env.source"\n' "$t" "$HL" > "$F/repo/scripts/cloud/env-setup.sh"
+printf 'echo "install-time $*" >> "%s/calls"\n' "$t" > "$HL/install-time.sh"
+(cd "$F/repo" && env -u CLOUD_SETUP_HOME -u CLOUD_SETUP_PREFIX HOME="$F/home" CLOUD_SETUP_WORKSPACE="$WH/ws" CLOUD_SETUP_ROOTS="$F/none/*" \
+  OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t bash "$F/setup.sh" >/dev/null)
+[ "$(paste -sd'|' "$t/calls")" = "stub prefix=unset|install-time --repo $F/repo" ] && [ -f "$F/home/.cloud-env.source" ] && [ ! -e "$WH/ws/.cloud" ] \
+  && ok "writable HOME: hand-off reads ~/.cloud-env.source, passes no prefix" || no "writable HOME hand-off: $(cat "$t/calls" 2>/dev/null)"
+rm -f "$F/repo/scripts/cloud/env-setup.sh" "$F/home/.cloud-env.source"
+nr "$here/setup.sh" --repo "$NR/repo" >/dev/null
+[ "$(jq '[.hooks.SessionStart[].hooks[].command | select(endswith("# cloud-setup"))] | length' "$NR/home/.claude/settings.json")" = 1 ] && [ -x "$NR/home/.local/bin/gh" ] \
+  && ok "writable HOME, plain user: SessionStart hook in ~/.claude, tools in ~/.local/bin" || no "writable HOME hook/tools"
+
+# A read-only HOME (Codex Cloud's setup: only /workspace and /tmp are writable): everything goes to
+# <workspace>/.cloud, nothing under HOME, and the summary names the prefix.
+RO="$t/ro"; mkdir -p "$RO/home" "$RO/ws" "$RO/repo/scripts/cloud"; : > "$RO/repo/scripts/cloud/manifest"; chmod 555 "$RO/home"
+if [ -w "$RO/home" ]; then
+  echo "  - read-only HOME tests skipped (running as root: chmod 555 does not stop writes)"
+else
+  ro() { /usr/bin/env -i HOME="$RO/home" PATH="$NR/fake:$NR/tools" TMPDIR="$t" CLOUD_SETUP_WORKSPACE="$RO/ws" CLOUD_SETUP_ROOTS="$NR/none/*" "$@"; }
+  P="$RO/ws/.cloud"
+  [ "$(ro "$NR/tools/bash" -c ". '$here/lib/common.sh'; $paths")" = "$P/bin|$P/opt|$P/share/cloud-env|1|$P|$P/home" ] \
+    && ok "read-only HOME: bin, opt, share under <workspace>/.cloud" || no "read-only HOME paths: $(ro "$NR/tools/bash" -c ". '$here/lib/common.sh'; $paths")"
+  [ "$(ro CLOUD_SETUP_PREFIX="$RO/ws/mine" "$NR/tools/bash" -c ". '$here/lib/common.sh'; echo \$BIN")" = "$RO/ws/mine/bin" ] \
+    && ok "read-only HOME: CLOUD_SETUP_PREFIX wins" || no "CLOUD_SETUP_PREFIX"
+  out="$(ro "$NR/tools/bash" "$here/setup.sh" --repo "$RO/repo")"; rc=$?
+  ( . "$here/pins.env"
+    [ "$("$P/bin/gh" --version)" = "gh version $GH_PIN (fixture)" ] && [ "$("$P/bin/jq" --version)" = "jq-$JQ_PIN" ] \
+      && [ "$("$P/bin/pandoc" --version)" = "pandoc $PANDOC_PIN" ] && [ -d "$P/opt/gh_${GH_PIN}_linux_$narch" ] ) \
+    && [ $rc = 0 ] && grep -Eq "^cloud-setup: core=ok secs=[0-9]+ prefix=$P log=$P/share/cloud-env/setup.log$" <<<"$out" \
+    && ok "read-only HOME: core installs into the prefix, summary says prefix=" || no "read-only HOME run: rc=$rc $out $(ls "$P/bin" 2>&1)"
+  [ "$(cut -c1-5 "$P/share/cloud-env/setup-result")" = base= ] && ! grep -q ERROR "$P/share/cloud-env/setup-result" \
+    && ok "read-only HOME: setup-result in <prefix>/share/cloud-env, no error" || no "read-only result: $(cat "$P/share/cloud-env/setup-result" 2>&1)"
+  grep -q 'HOME is read-only; user-level Claude Code SessionStart hook skipped' "$P/share/cloud-env/setup.log" \
+    && ok "read-only HOME: SessionStart hook skipped with a note, core not failed" || no "read-only hook note"
+  [ -z "$(ls -A "$RO/home")" ] && ok "read-only HOME: nothing written under HOME" || no "wrote under HOME: $(ls -A "$RO/home")"
+  [ "$(ro "$NR/tools/bash" -c ". '$P/env'; echo \$CLOUD_PREFIX; command -v gh")" = "$P"$'\n'"$P/bin/gh" ] \
+    && ok "read-only HOME: <prefix>/env records the prefix and puts its bin on PATH" || no "prefix env: $(cat "$P/env" 2>&1)"
+  ( . "$here/pins.env"; printf '#!/bin/sh\necho "$HOME" > %s/uv-home; echo ok\n' "$RO" > "$NR/rel/uv-install.sh" )
+  ro UV_PIN=none "$NR/tools/bash" -c ". '$here/lib/common.sh'; uv() { :; }; curl() { cat '$NR/rel/uv-install.sh'; }; . '$here/modules/core.sh'; core_uv" >/dev/null 2>&1
+  [ "$(cat "$RO/uv-home" 2>/dev/null)" = "$P/home" ] && ok "read-only HOME: third-party installers get <prefix>/home as HOME" || no "installer HOME: $(cat "$RO/uv-home" 2>&1)"
+  # Bootstrap (piped from curl): the self-download goes to <prefix>/share/cloud-setup; a failed one is
+  # still recorded, in the prefix.
+  (cd "$t" && ro PATH="$PATH" CLOUD_SETUP_TARBALL="file://$t/src.tgz" bash -s -- --fetch-only < "$here/setup.sh"); rc=$?
+  [ $rc = 0 ] && [ "$(cat "$P/share/cloud-setup/.commit" 2>/dev/null)" = "$sha" ] && ok "read-only HOME: bootstrap downloads to <prefix>/share/cloud-setup" || no "read-only bootstrap rc=$rc"
+  (cd "$t" && ro CLOUD_SETUP_PREFIX="$RO/ws/p2" CLOUD_SETUP_TARBALL="file://$t/missing.tgz" "$NR/tools/bash" -s < "$here/setup.sh" 2>/dev/null); rc=$?
+  [ $rc = 0 ] && grep -q '^ERROR=could not download' "$RO/ws/p2/share/cloud-env/setup-result" && ok "read-only HOME: a failed bootstrap is recorded in the prefix" || no "read-only bootstrap failure rc=$rc"
+  # Hand-off: the stub gets CLOUD_SETUP_PREFIX and records the layer in <prefix>/share/cloud-env/source.
+  HL="$t/layer3"; mkdir -p "$HL"; rm -f "$t/calls"
+  printf 'echo "stub prefix=$CLOUD_SETUP_PREFIX" >> "%s/calls"; echo "clone %s" > "$CLOUD_SETUP_PREFIX/share/cloud-env/source"\n' "$t" "$HL" > "$RO/repo/scripts/cloud/env-setup.sh"
+  printf 'echo "install-time $*" >> "%s/calls"\n' "$t" > "$HL/install-time.sh"
+  out="$(ro OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t "$NR/tools/bash" "$here/setup.sh" --repo "$RO/repo")"
+  [ "$(paste -sd'|' "$t/calls")" = "stub prefix=$P|install-time --repo $RO/repo" ] && grep -q 'session-layer=ok' <<<"$out" && [ -z "$(ls -A "$RO/home")" ] \
+    && ok "read-only HOME: hand-off passes the prefix, reads <prefix>/share/cloud-env/source" || no "read-only hand-off: $out / $(cat "$t/calls" 2>/dev/null)"
+fi
 
 exit $fail

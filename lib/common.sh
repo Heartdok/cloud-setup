@@ -23,12 +23,43 @@ repo_pins() {
 repo_pins
 
 export DEBIAN_FRONTEND=noninteractive
-if [ "$(id -u)" = 0 ]; then BIN=/usr/local/bin; OPT=/opt; else BIN="$HOME/.local/bin"; OPT="$HOME/.local/opt"; fi
+
+# Where things install. Root: /usr/local/bin and /opt. A plain user: ~/.local. Only when HOME is
+# NOT writable (Codex Cloud's setup: only /workspace and /tmp are writable, and only /workspace
+# reaches the snapshot) does anything change: one writable prefix, $CLOUD_SETUP_PREFIX, else
+# <workspace>/.cloud (CLOUD_SETUP_WORKSPACE, default /workspace), else $TMPDIR/.cloud (gone after
+# setup, but nothing fails). A writable HOME (Claude Code as root, Cursor as a user) never takes
+# this branch. setup.sh repeats this rule for its bootstrap; keep the two the same.
+#   RO_HOME 1 when HOME is read-only, then CLOUD_PREFIX is that prefix (empty otherwise)
+#   IHOME   the HOME a third-party installer gets: $HOME, or <prefix>/home when HOME is read-only
+# Neither is exported: every step sources this file and resolves them again.
+cloud_prefix() { # → the prefix when HOME is read-only; fails (prints nothing) when HOME is writable
+  [ -n "${HOME:-}" ] && [ -d "$HOME" ] && ! [ -w "$HOME" ] || return 1 # an existing, unwritable HOME only
+  if [ -n "${CLOUD_SETUP_PREFIX:-}" ]; then echo "$CLOUD_SETUP_PREFIX"; return 0; fi
+  local w="${CLOUD_SETUP_WORKSPACE:-/workspace}"
+  if [ -d "$w" ] && [ -w "$w" ]; then echo "$w/.cloud"; else echo "${TMPDIR:-/tmp}/.cloud"; fi
+}
+RO_HOME=0; IHOME="$HOME"; CLOUD_PREFIX=""
+if CLOUD_PREFIX="$(cloud_prefix)"; then
+  RO_HOME=1; BIN="$CLOUD_PREFIX/bin"; OPT="$CLOUD_PREFIX/opt"; IHOME="$CLOUD_PREFIX/home"
+  SHARE="${CLOUD_ENV_SHARE:-$CLOUD_PREFIX/share/cloud-env}"
+  # Tools that write caches or data under ~ by default write them here instead (setup only).
+  export XDG_CACHE_HOME="${TMPDIR:-/tmp}/cloud-setup-cache" XDG_DATA_HOME="$CLOUD_PREFIX/share" XDG_CONFIG_HOME="$CLOUD_PREFIX/config"
+  export BUN_INSTALL_CACHE_DIR="$XDG_CACHE_HOME/bun" UV_CACHE_DIR="$XDG_CACHE_HOME/uv" \
+         UV_PYTHON_INSTALL_DIR="$CLOUD_PREFIX/opt/uv-python" UV_TOOL_DIR="$CLOUD_PREFIX/opt/uv-tools" UV_TOOL_BIN_DIR="$BIN"
+  mkdir -p "$IHOME"
+else # unchanged: a writable HOME (or root)
+  CLOUD_PREFIX=""
+  if [ "$(id -u)" = 0 ]; then BIN=/usr/local/bin; OPT=/opt; else BIN="$HOME/.local/bin"; OPT="$HOME/.local/opt"; fi
+  SHARE="${CLOUD_ENV_SHARE:-$HOME/.local/share/cloud-env}"
+fi
 export PATH="$BIN:$HOME/.local/bin:$HOME/.bun/bin:$PATH" # what we install wins over the image's
-SHARE="${CLOUD_ENV_SHARE:-$HOME/.local/share/cloud-env}"
 mkdir -p "$BIN" "$OPT" "$SHARE"
 
 link() { ln -sfn "$2" "$BIN/$1"; } # name target
+# A third-party installer that writes to ~ (shell rc files, receipts, its own home): with a
+# read-only HOME it gets IHOME instead, so it neither fails nor touches ~. Otherwise unchanged.
+in_ihome() { if [ "$RO_HOME" = 1 ]; then HOME="$IHOME" "$@"; else "$@"; fi; }
 
 # Root, passwordless sudo, or neither: some sandboxes build as a plain user with no sudo binary at
 # all (Codex Cloud). Then $SUDO is need_root, which refuses and names the command; can_root tells.

@@ -19,6 +19,17 @@ module their manifests name. `|| true` keeps the line safe even under a strict s
 Non-root without sudo (Codex Cloud) is supported for `core`: gh, jq, git-lfs and pandoc install as
 pinned user-space binaries in `~/.local`, and a module that needs apt fails by name.
 
+**Read-only HOME** (Codex Cloud's setup: the root filesystem and `/home/agent` are read-only, only
+`/workspace` and `/tmp` are writable, and only `/workspace` reaches the snapshot): everything that
+would go under `~` goes under one writable prefix instead, `$CLOUD_SETUP_PREFIX`, else
+`/workspace/.cloud` (`CLOUD_SETUP_WORKSPACE` moves `/workspace`, for tests), else `$TMPDIR/.cloud`.
+It holds `bin/`, `opt/`, `share/cloud-setup/` (this repo), `share/cloud-env/` (the result files below),
+and `env`, which records the prefix: `. /workspace/.cloud/env` puts its `bin` on PATH. Installers
+that write to `~` (Bun's, uv's, Grok's, Cursor's) get `<prefix>/home` as their HOME; core skips the
+user-level SessionStart hook with a note; the summary line ends with `prefix=<dir>`. This applies
+only when `$HOME` exists and is not writable: with a writable HOME (Claude Code as root, Cursor as
+a user) every path, file, hook and output line is what it was before, and the tests check that.
+
 From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]` (`--no-local` also skips the
 session-layer hand-off below).
 
@@ -28,7 +39,8 @@ session-layer hand-off below).
 - **A time budget.** Platforms stop caching a setup that runs for about five minutes, so steps share
   `CLOUD_SETUP_BUDGET` seconds (default 240). A step that overruns is killed, later ones are skipped,
   and the result says which.
-- **A result you can read later**, in `$HOME/.local/share/cloud-env/`:
+- **A result you can read later**, in `$HOME/.local/share/cloud-env/` (`<prefix>/share/cloud-env/`
+  with a read-only HOME):
   - `setup-result`: `running: <step> (since T)` while running, then `base=<commit>`, followed by
     ` ERROR=<…>` if anything went wrong (unknown modules, failed or skipped steps, no manifest).
   - `setup.log`: everything the steps printed.
@@ -88,7 +100,8 @@ nothing when a task starts (Codex Cloud). So when **1Password Connect is configu
 `scripts/cloud/env-setup.sh`, the installer runs, after the modules:
 
 1. `bash <repo>/scripts/cloud/env-setup.sh --fetch-only`: the repo's stub fetches the layer and
-   records `<how> <dir>` in `~/.cloud-env.source`;
+   records `<how> <dir>` in `~/.cloud-env.source` (read-only HOME: `<prefix>/share/cloud-env/source`,
+   with the prefix passed as `CLOUD_SETUP_PREFIX`);
 2. `bash <dir>/install-time.sh --repo <repo>…`: the layer installs what needs no secret.
 
 This repo never reads a secret; the stub reads what it needs in memory, and the snapshot keeps none.
@@ -104,7 +117,9 @@ Add `modules/<name>.sh`. Its first line is `# <name> — <one-line description>`
 (one line of versions) and `requires="other-module …"`. Modules run in their own process with
 `lib/common.sh` loaded, which provides `apt_install`, `link <name> <target>` (into `$BIN`), `ver`,
 `can_root`, and `$BIN`, `$OPT`, `$SHARE`, `$REPO`, `$SUDO` (empty as root, `sudo -n` with
-passwordless sudo, else a stub that fails saying so). Keep `setup()` idempotent: it also runs when
+passwordless sudo, else a stub that fails saying so). A vendor installer that writes to `~` runs
+under `in_ihome` and finds its files under `$IHOME` (HOME, or `<prefix>/home` when HOME is
+read-only). Keep `setup()` idempotent: it also runs when
 a session repairs a snapshot. Run `bash tests/run.sh` and `shellcheck -x` before opening a PR.
 
 ## How updates land
