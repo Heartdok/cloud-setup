@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 gh_latest() { # owner/repo → tag without leading v
   curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
-    "https://api.github.com/repos/$1/releases/latest" | jq -r '.tag_name' | sed 's/^v//; s/^bun-v//'
+    "https://api.github.com/repos/$1/releases/latest" | jq -r '.tag_name' | sed 's/^v//; s/^bun-v//; s/^jq-//'
 }
 npm_latest() { curl -fsSL "https://registry.npmjs.org/$1/latest" | jq -r .version; }
 set_pin() { # NAME value
@@ -18,6 +18,9 @@ set_pin() { # NAME value
 set_pin UV_PIN "$(gh_latest astral-sh/uv)"
 set_pin BUN_PIN "$(gh_latest oven-sh/bun)"
 set_pin PANDOC_PIN "$(gh_latest jgm/pandoc)"
+set_pin GH_PIN "$(gh_latest cli/cli)"
+set_pin JQ_PIN "$(gh_latest jqlang/jq)"
+set_pin GIT_LFS_PIN "$(gh_latest git-lfs/git-lfs)"
 set_pin NODE_PIN "$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version' | sed 's/^v//')"
 set_pin CODEX_PIN "$(npm_latest @openai/codex)"
 set_pin OP_CLI_PIN "$(curl -fsSL https://app-updates.agilebits.com/check/1/0/CLI2/en/2.0.0/N | jq -r .version)"

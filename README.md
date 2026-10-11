@@ -16,6 +16,9 @@ It downloads this repository anonymously (a tarball; no git, no credentials) to 
 (or `~/.local/share/cloud-setup` when not root), finds the projects, and installs `core` plus every
 module their manifests name. `|| true` keeps the line safe even under a strict shell.
 
+Non-root without sudo (Codex Cloud) is supported for `core`: gh, jq, git-lfs and pandoc install as
+pinned user-space binaries in `~/.local`, and a module that needs apt fails by name.
+
 From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]`.
 
 ## What it guarantees
@@ -84,8 +87,9 @@ Add `modules/<name>.sh`. Its first line is `# <name> — <one-line description>`
 `--list`); it defines `setup()` (install; return non-zero on failure) and optionally `status()`
 (one line of versions) and `requires="other-module …"`. Modules run in their own process with
 `lib/common.sh` loaded, which provides `apt_install`, `link <name> <target>` (into `$BIN`), `ver`,
-and `$BIN`, `$OPT`, `$SHARE`, `$REPO`, `$SUDO`. Keep `setup()` idempotent: it also runs when a
-session repairs a snapshot. Run `bash tests/run.sh` and `shellcheck -x` before opening a PR.
+`can_root`, and `$BIN`, `$OPT`, `$SHARE`, `$REPO`, `$SUDO` (empty as root, `sudo -n` with
+passwordless sudo, else a stub that fails saying so). Keep `setup()` idempotent: it also runs when
+a session repairs a snapshot. Run `bash tests/run.sh` and `shellcheck -x` before opening a PR.
 
 ## How updates land
 Sandboxes rebuild their snapshot when the setup-script text or network settings change, or after

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline tests: manifest parsing, repo discovery, the always-exit-0 contract, the time budget,
-# self-download, pins and the session hook. Nothing is installed.
+# self-download, pins, the session hook and installing without root. Nothing real is installed.
 set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0; ok() { echo "  ✓ $*"; }; no() { echo "  ✗ $*"; fail=1; }
@@ -129,5 +129,77 @@ cmd="$(jq -r '.hooks.SessionStart[-1].hooks[0].command' "$hk")"
 [ -z "$(cd "$t/hkrun/r" && env -u CLAUDE_CODE_REMOTE bash -c "$cmd")" ] && ok "session hook is a no-op outside remote sessions" || no "session hook ran locally"
 echo '{"hooks":{"SessionStart":[{"hooks":[{"command":"bash scripts/cloud/session-start.sh"}]}]}}' > "$t/hkrun/r/.claude/settings.json"
 [ -z "$(cd "$t/hkrun/r" && CLAUDE_CODE_REMOTE=true bash -c "$cmd")" ] && ok "session hook defers to the project's own hook" || no "session hook double-runs"
+
+# Without root or sudo (Codex Cloud builds as a plain user with no sudo binary): a PATH of real
+# tools minus sudo/apt/dpkg/git, a fake id (uid 1000) and a fake curl serving release fixtures.
+NR="$t/nr"; mkdir -p "$NR/fake" "$NR/tools" "$NR/rel" "$NR/home" "$NR/repo/scripts/cloud"
+for c in bash sh env true mkdir ln rm mv cp cat sed grep awk tr head cut dirname basename uname mktemp \
+         tar gzip chmod install sort comm ls cmp date paste tee timeout sha256sum shasum touch sleep wc find; do
+  p="$(type -P "$c")" && ln -s "$p" "$NR/tools/$c"
+done
+realid="$(type -P id)"; realjq="$(type -P jq)"
+case "$(uname -m)" in x86_64) narch=amd64 ;; *) narch=arm64 ;; esac
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo 1000; exit 0; }; exec %s "$@"\n' "$realid" > "$NR/fake/id"
+printf '#!/bin/sh\necho "$*" >> %s/apt.log\n' "$NR" | tee "$NR/fake/apt-get" > "$NR/fake/add-apt-repository"
+cat > "$NR/fake/curl" <<SH
+#!/bin/sh
+out=""; url=""
+while [ \$# -gt 0 ]; do case "\$1" in -o) out="\$2"; shift 2 ;; http*) url="\$1"; shift ;; *) shift ;; esac; done
+echo "\$url" >> "$NR/curl.log"
+f="$NR/rel/\${url#*/releases/download/}"
+[ -f "\$f" ] || exit 22
+if [ -n "\$out" ]; then cp "\$f" "\$out"; else cat "\$f"; fi
+SH
+( . "$here/pins.env"
+  printf '#!/bin/sh\necho v22.1.0\n' > "$NR/fake/node"
+  printf '#!/bin/sh\necho "uv %s"\n' "$UV_PIN" > "$NR/fake/uv"
+  printf '#!/bin/sh\necho %s\n' "$BUN_PIN" > "$NR/fake/bun"
+  printf '#!/bin/sh\necho %s\n' "$OP_CLI_PIN" > "$NR/fake/op"
+  a="$narch"
+  sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+  mkbin() { mkdir -p "$(dirname "$1")"; printf '#!/bin/sh\n%s\n' "$2" > "$1"; chmod +x "$1"; }
+  r="$NR/rel/v$GH_PIN"; s="$t/stage/gh"; mkbin "$s/gh_${GH_PIN}_linux_$a/bin/gh" "echo 'gh version $GH_PIN (fixture)'"
+  mkdir -p "$r" && tar -czf "$r/gh_${GH_PIN}_linux_$a.tar.gz" -C "$s" . \
+    && echo "$(sha "$r/gh_${GH_PIN}_linux_$a.tar.gz")  gh_${GH_PIN}_linux_$a.tar.gz" > "$r/gh_${GH_PIN}_checksums.txt"
+  r="$NR/rel/jq-$JQ_PIN"; mkbin "$r/jq-linux-$a" "[ \"\$1\" = --version ] && { echo jq-$JQ_PIN; exit 0; }; exec $realjq \"\$@\""
+  echo "$(sha "$r/jq-linux-$a")  jq-linux-$a" > "$r/sha256sum.txt"
+  r="$NR/rel/v$GIT_LFS_PIN"; s="$t/stage/lfs"; mkbin "$s/git-lfs-$GIT_LFS_PIN/git-lfs" "echo 'git-lfs/$GIT_LFS_PIN (fixture)'"
+  f="git-lfs-linux-$a-v$GIT_LFS_PIN.tar.gz"; mkdir -p "$r" && tar -czf "$r/$f" -C "$s" . \
+    && printf -- '-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA512\n\n%s *%s\n' "$(sha "$r/$f")" "$f" > "$r/sha256sums.asc"
+  r="$NR/rel/$PANDOC_PIN"; s="$t/stage/pandoc"; mkbin "$s/pandoc-$PANDOC_PIN/bin/pandoc" "echo 'pandoc $PANDOC_PIN'"
+  mkdir -p "$r" && tar -czf "$r/pandoc-$PANDOC_PIN-linux-$a.tar.gz" -C "$s" . )
+chmod +x "$NR/fake/"*
+nr() { /usr/bin/env -i HOME="$NR/home" PATH="$NR/fake:$NR/tools" TMPDIR="$t" CLOUD_SETUP_ROOTS="$NR/none/*" "$NR/tools/bash" "$@"; }
+[ "$(nr -c ". '$here/lib/common.sh'; can_root || echo \$SUDO")" = need_root ] && ok "no sudo binary: \$SUDO refuses, can_root says no" || no "no-sudo detection"
+echo office > "$NR/repo/scripts/cloud/manifest"
+out="$(nr "$here/setup.sh" --repo "$NR/repo")"; rc=$?
+nbin="$NR/home/.local/bin"; ( . "$here/pins.env"
+  [ "$("$nbin/gh" --version)" = "gh version $GH_PIN (fixture)" ] && [ "$("$nbin/jq" --version)" = "jq-$JQ_PIN" ] \
+    && [ "$("$nbin/git-lfs" --version)" = "git-lfs/$GIT_LFS_PIN (fixture)" ] && [ "$("$nbin/pandoc" --version)" = "pandoc $PANDOC_PIN" ] \
+    && [ -d "$NR/home/.local/opt/gh_${GH_PIN}_linux_$narch" ] ) \
+  && ok "no root: gh, jq, git-lfs, pandoc pinned in ~/.local" || no "no-root user-space installs: $(ls "$nbin" 2>&1)"
+[ $rc = 0 ] && grep -q 'core=ok office=failed(1)' <<<"$out" && ok "no root: core ok, the apt-needing module fails by name" || no "no-root summary: $out"
+grep -q 'needs root or passwordless sudo' "$NR/home/.local/share/cloud-env/setup.log" && ok "no root: the failure says root or passwordless sudo is needed" || no "no-root message"
+grep -q 'system packages left to the image, missing: .*fontconfig' "$NR/home/.local/share/cloud-env/setup.log" && ok "no root: missing system packages named, not a failure" || no "no-root note"
+[ ! -e "$NR/apt.log" ] && ok "no root: apt never invoked" || no "apt ran: $(cat "$NR/apt.log")"
+[ "$(jq '[.hooks.SessionStart[].hooks[].command | select(endswith("# cloud-setup"))] | length' "$NR/home/.claude/settings.json")" = 1 ] \
+  && ok "no root: session hook written with the user-space jq" || no "no-root session hook"
+n="$(wc -l < "$NR/curl.log")"; nr "$here/setup.sh" --repo "$NR/repo" >/dev/null
+[ "$(wc -l < "$NR/curl.log")" = "$n" ] && ok "no root: rerun downloads nothing" || no "no-root rerun downloaded: $(tail -n +"$((n + 1))" "$NR/curl.log")"
+( . "$here/pins.env"; echo "0000  jq-linux-$narch" > "$NR/rel/jq-$JQ_PIN/sha256sum.txt" )
+rm -f "$nbin/jq"; err="$(nr -c ". '$here/lib/common.sh'; . '$here/modules/core.sh'; core_jq" 2>&1)"; rc=$?
+[ $rc != 0 ] && [ ! -e "$nbin/jq" ] && grep -q 'REFUSING jq-linux' <<<"$err" && ok "no root: a binary the release's sha256 list does not vouch for is refused" || no "checksum refusal: rc=$rc $err"
+# apt_install: nothing missing needs no root; something missing without root fails by name; with
+# passwordless sudo it is still apt.
+printf '#!/bin/sh\n[ "$3" = absent ] && exit 1; printf "install ok installed"\n' > "$NR/fake/dpkg-query"; chmod +x "$NR/fake/dpkg-query"
+nr -c ". '$here/lib/common.sh'; apt_install curl git" && [ ! -e "$NR/apt.log" ] && ok "apt_install: nothing missing → 0, no root needed" || no "apt_install nothing missing"
+err="$(nr -c ". '$here/lib/common.sh'; apt_install curl absent" 2>&1)"; rc=$?
+[ $rc != 0 ] && grep -q 'absent missing; installing needs root or passwordless sudo' <<<"$err" && [ ! -e "$NR/apt.log" ] \
+  && ok "apt_install: missing without root → named failure" || no "apt_install no root: rc=$rc $err"
+printf '#!/bin/sh\nexit 1\n' > "$NR/fake/sudo"; chmod +x "$NR/fake/sudo"
+[ "$(nr -c ". '$here/lib/common.sh'; echo \$SUDO")" = need_root ] && ok "sudo that wants a password counts as no sudo" || no "password sudo"
+printf '#!/bin/sh\n[ "$1" = -n ] && shift; exec "$@"\n' > "$NR/fake/sudo"
+nr -c ". '$here/lib/common.sh'; apt_install curl absent" && grep -q 'install .*absent' "$NR/apt.log" \
+  && ok "passwordless sudo: apt_install still uses apt" || no "sudo apt path: $(cat "$NR/apt.log" 2>/dev/null)"
 
 exit $fail

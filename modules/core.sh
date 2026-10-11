@@ -1,11 +1,13 @@
 # core — always installed: apt basics, gh, jq, git-lfs, uv, Bun (the only JS package manager: npm/npx
 # are shimmed to bun), Node runtime (if missing or < 20), pandoc, 1Password CLI (install only), and
 # a user-level SessionStart hook that runs a project's scripts/cloud/session-start.sh.
+# Without root or passwordless sudo, gh, jq, git-lfs and pandoc are pinned release binaries in
+# $BIN/$OPT (~/.local) instead, and missing system packages are left to the image and named once.
 # shellcheck shell=bash
 
 setup() {
   local rc=0
-  apt_install ca-certificates curl unzip xz-utils gnupg jq git git-lfs gh fontconfig || rc=1
+  core_packages || rc=1
   core_node || rc=1
   core_uv || rc=1
   core_bun || rc=1
@@ -14,6 +16,80 @@ setup() {
   core_op || rc=1
   core_session_hook || rc=1
   return $rc
+}
+
+CORE_APT="ca-certificates curl unzip xz-utils gnupg jq git git-lfs gh fontconfig"
+
+# As root or with passwordless sudo: apt. Without either (Codex Cloud builds as a plain user with
+# no sudo binary): gh, jq and git-lfs as pinned release binaries; the system packages that have no
+# sane user-space install are the image's business, named once when missing and not a failure.
+core_packages() {
+  # shellcheck disable=SC2086 # a word list
+  if can_root; then apt_install $CORE_APT; return; fi
+  local rc=0 p c missing=()
+  core_jq || rc=1
+  core_gh || rc=1
+  core_git_lfs || rc=1
+  for p in ca-certificates:/etc/ssl/certs/ca-certificates.crt curl:curl unzip:unzip xz-utils:xz \
+           gnupg:gpg git:git fontconfig:fc-cache; do
+    c="${p#*:}"; p="${p%%:*}"
+    apt_installed "$p" || command -v "$c" >/dev/null 2>&1 || [ -e "$c" ] || missing+=("$p")
+  done
+  [ ${#missing[@]} -eq 0 ] \
+    || echo "core: no root or passwordless sudo; system packages left to the image, missing: ${missing[*]}"
+  return $rc
+}
+
+core_arch() { case "$(uname -m)" in x86_64) echo amd64 ;; aarch64|arm64) echo arm64 ;; *) return 1 ;; esac; }
+sha256_of() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+
+# A copy the image already has is kept; ours (in $BIN) must match its pin.
+core_have() { # command pin
+  local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+  case "$p" in "$BIN"/*) [ "$(ver "$1" --version)" = "$2" ] ;; esac
+}
+
+# A pinned release asset into <out>, refused unless the sha256 list the release publishes vouches
+# for it (no list given: HTTPS only, as with the .deb it replaces).
+core_fetch() { # url sums-url out
+  local name="${1##*/}" want
+  curl -fsSL --retry 2 --max-time 300 -o "$3" "$1" || { echo "core: download failed: $1" >&2; return 1; }
+  [ -n "$2" ] || return 0
+  want="$(curl -fsSL --retry 2 --max-time 60 "$2" | awk -v f="$name" '{n = $2; sub(/^\*/, "", n)} n == f {print $1; exit}')"
+  [ -n "$want" ] && [ "$want" = "$(sha256_of "$3")" ] && return 0
+  echo "core: REFUSING $name — its sha256 is not in $2" >&2; return 1
+}
+
+# A pinned release tarball unpacked whole to $OPT/<dir>, one binary in it linked into $BIN.
+core_tarball() { # url sums-url dir binary-in-dir name
+  local tmp rc; tmp="$(mktemp -d)"
+  core_fetch "$1" "$2" "$tmp/a.tgz" && tar -xzf "$tmp/a.tgz" -C "$tmp" && [ -x "$tmp/$3/$4" ] \
+    && rm -rf "${OPT:?}/$3" && mv "$tmp/$3" "$OPT/$3" && link "$5" "$OPT/$3/$4"
+  rc=$?; rm -rf "$tmp"; hash -r; return $rc
+}
+
+core_jq() {
+  core_have jq "$JQ_PIN" && return 0
+  local arch tmp rc base="https://github.com/jqlang/jq/releases/download/jq-${JQ_PIN}"
+  arch="$(core_arch)" || return 1; tmp="$(mktemp -d)"
+  core_fetch "$base/jq-linux-$arch" "$base/sha256sum.txt" "$tmp/jq" && install -m 755 "$tmp/jq" "$BIN/jq"
+  rc=$?; rm -rf "$tmp"; hash -r; [ $rc = 0 ] && [ "$(ver jq --version)" = "$JQ_PIN" ]
+}
+
+core_gh() {
+  core_have gh "$GH_PIN" && return 0
+  local arch base="https://github.com/cli/cli/releases/download/v${GH_PIN}"
+  arch="$(core_arch)" || return 1
+  core_tarball "$base/gh_${GH_PIN}_linux_$arch.tar.gz" "$base/gh_${GH_PIN}_checksums.txt" \
+    "gh_${GH_PIN}_linux_$arch" bin/gh gh && [ "$(ver gh --version)" = "$GH_PIN" ]
+}
+
+core_git_lfs() { # sha256sums.asc is clearsigned; its hash lines are read, the signature is not checked
+  core_have git-lfs "$GIT_LFS_PIN" && return 0
+  local arch base="https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_PIN}"
+  arch="$(core_arch)" || return 1
+  core_tarball "$base/git-lfs-linux-$arch-v${GIT_LFS_PIN}.tar.gz" "$base/sha256sums.asc" \
+    "git-lfs-${GIT_LFS_PIN}" git-lfs git-lfs && [ "$(ver git-lfs --version)" = "$GIT_LFS_PIN" ]
 }
 
 status() { echo "node=$(ver node --version) uv=$(ver uv --version) bun=$(ver bun --version) pandoc=$(ver pandoc --version) op=$(ver op --version) gh=$(ver gh --version)"; }
@@ -74,7 +150,12 @@ core_bun() {
 core_pandoc() {
   [ "$(ver pandoc --version)" = "$PANDOC_PIN" ] && return 0
   local arch deb
-  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) return 1 ;; esac
+  arch="$(core_arch)" || return 1
+  if ! can_root; then # the same release's static tarball (it publishes no checksum list)
+    core_tarball "https://github.com/jgm/pandoc/releases/download/${PANDOC_PIN}/pandoc-${PANDOC_PIN}-linux-$arch.tar.gz" "" \
+      "pandoc-${PANDOC_PIN}" bin/pandoc pandoc && [ "$(ver pandoc --version)" = "$PANDOC_PIN" ]
+    return
+  fi
   deb="$(mktemp --suffix=.deb)"
   curl -fsSL -o "$deb" "https://github.com/jgm/pandoc/releases/download/${PANDOC_PIN}/pandoc-${PANDOC_PIN}-1-$arch.deb" \
     && $SUDO dpkg -i "$deb"; local rc=$?; rm -f "$deb"; return $rc
@@ -84,7 +165,7 @@ core_pandoc() {
 core_op() {
   [ "$(op --version 2>/dev/null)" = "$OP_CLI_PIN" ] && return 0
   local key=3FEF9748469ADBE15DA7CA80AC2D62742012EA22 arch tmp
-  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) return 1 ;; esac
+  arch="$(core_arch)" || return 1
   tmp="$(mktemp -d)"
   curl -fsSL --max-time 120 -o "$tmp/op.zip" \
     "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_CLI_PIN}/op_linux_${arch}_v${OP_CLI_PIN}.zip" \

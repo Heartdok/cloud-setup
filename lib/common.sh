@@ -23,15 +23,20 @@ repo_pins() {
 repo_pins
 
 export DEBIAN_FRONTEND=noninteractive
-export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:$PATH"
-
 if [ "$(id -u)" = 0 ]; then BIN=/usr/local/bin; OPT=/opt; else BIN="$HOME/.local/bin"; OPT="$HOME/.local/opt"; fi
+export PATH="$BIN:$HOME/.local/bin:$HOME/.bun/bin:$PATH" # what we install wins over the image's
 SHARE="${CLOUD_ENV_SHARE:-$HOME/.local/share/cloud-env}"
 mkdir -p "$BIN" "$OPT" "$SHARE"
 
 link() { ln -sfn "$2" "$BIN/$1"; } # name target
 
-SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo -n" # some sandboxes build as a sudo-capable user
+# Root, passwordless sudo, or neither: some sandboxes build as a plain user with no sudo binary at
+# all (Codex Cloud). Then $SUDO is need_root, which refuses and names the command; can_root tells.
+need_root() { echo "needs root or passwordless sudo: $*" >&2; return 1; }
+if [ "$(id -u)" = 0 ]; then SUDO=""
+elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO="sudo -n"
+else SUDO=need_root; fi
+can_root() { [ "$SUDO" != need_root ]; }
 apt_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 apt_update() { # once per setup run (APT_STAMP, shared across steps), else once per shell
   if [ -n "${APT_STAMP:-}" ]; then [ -f "$APT_STAMP" ] && return 0
@@ -40,11 +45,11 @@ apt_update() { # once per setup run (APT_STAMP, shared across steps), else once 
   _APT_UPDATED=1; [ -z "${APT_STAMP:-}" ] || touch "$APT_STAMP"
 }
 apt_stale() { _APT_UPDATED=""; [ -z "${APT_STAMP:-}" ] || rm -f "$APT_STAMP"; } # after adding a source
-apt_install() { # packages...: quiet, idempotent; no apt-get at all when everything is installed
-  [ -z "$SUDO" ] || $SUDO true 2>/dev/null || { echo "apt_install needs root or passwordless sudo: $*" >&2; return 1; }
+apt_install() { # packages...: quiet, idempotent; no apt-get (and no root needed) when all are installed
   local p missing=()
   for p in "$@"; do apt_installed "$p" || missing+=("$p"); done
   [ ${#missing[@]} -eq 0 ] && return 0
+  can_root || { echo "apt_install: ${missing[*]} missing; installing needs root or passwordless sudo" >&2; return 1; }
   apt_update && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
 }
 

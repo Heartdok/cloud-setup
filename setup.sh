@@ -110,7 +110,7 @@ main() {
   export LOG
   base="$(head -c 7 "$here/.commit" 2>/dev/null)"
   case "$base" in ""|unknown) base="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo local)" ;; esac
-  echo "cloud-setup base=$base repo=$(echo "$REPOS" | paste -sd' ') budget=${budget}s started $(date -u +%FT%TZ)" >> "$LOG"
+  echo "cloud-setup base=$base repo=$(echo "$REPOS" | paste -sd' ' -) budget=${budget}s started $(date -u +%FT%TZ)" >> "$LOG"
 
   # The modules are the union of every repo's manifest.
   local -a errors=()
