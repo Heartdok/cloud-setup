@@ -18,6 +18,12 @@ lib "validate_manifest '$t/none'" && ok "missing manifest is not an unknown modu
 lib 'known_modules' | grep -qx office && ! lib 'known_modules' | grep -qx core && ok "registry = modules/*.sh minus core" || no "known_modules"
 [ -n "$(lib 'module_description office')" ] && ok "module descriptions" || no "module_description"
 
+# Venue: Codex markers set CLOUD_VENUE=codex for repo steps; nothing else changes it.
+[ "$(env -u CLOUD_VENUE -u CODEX_ENVIRONMENT_ID -u CODEX_CI bash -c ". '$here/lib/common.sh'; echo \"\${CLOUD_VENUE:-unset}\"")" = unset ] \
+  && [ "$(env -u CLOUD_VENUE CODEX_ENVIRONMENT_ID=e1 bash -c ". '$here/lib/common.sh'; echo \"\$CLOUD_VENUE\"")" = codex ] \
+  && [ "$(env CLOUD_VENUE=cursor CODEX_CI=1 bash -c ". '$here/lib/common.sh'; echo \"\$CLOUD_VENUE\"")" = cursor ] \
+  && ok "venue: codex from Codex markers; unset otherwise (Claude); an explicit venue wins" || no "venue detection"
+
 # Repo discovery
 mkdir -p "$t/home/u/plain" "$t/home/u/proj/scripts/cloud" "$t/home/u/proj/sub" "$t/home/u/gitonly" "$t/empty"
 touch "$t/home/u/proj/scripts/cloud/manifest"; git -C "$t/home/u/proj" init -q; git -C "$t/home/u/gitonly" init -q
