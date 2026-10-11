@@ -32,12 +32,12 @@ agent_codex() {
   link codex "$real"
 }
 
-# The installer puts the binary in ~/.grok/bin. A `grok` already on $BIN (e.g. a wrapper written
-# by a session layer) is left alone.
+# The installer puts the binary in ~/.grok/bin (under IHOME, the prefix's scratch home, when ~ is
+# read-only). A `grok` already on $BIN (e.g. a wrapper written by a session layer) is left alone.
 agent_grok() {
-  local real="$HOME/.grok/bin/grok"
+  local real="$IHOME/.grok/bin/grok"
   if [ ! -x "$real" ]; then
-    _agent_cap bash -c 'curl -fsSL https://x.ai/cli/install.sh | bash' >/dev/null 2>&1 || return 1
+    in_ihome _agent_cap bash -c 'curl -fsSL https://x.ai/cli/install.sh | bash' >/dev/null 2>&1 || return 1
     [ -x "$real" ] || return 1
   fi
   [ -e "$BIN/grok" ] || link grok "$real"
@@ -46,9 +46,9 @@ agent_grok() {
 # Cursor's installer links `agent` and `cursor-agent` into ~/.local/bin. Grok's installer also
 # claims `agent`, so the unambiguous name everywhere here is `cursor-agent`.
 agent_cursor() {
-  [ -x "$HOME/.local/bin/cursor-agent" ] || _agent_cap bash -c 'curl -fsS https://cursor.com/install | bash' >/dev/null || return 1
-  [ -x "$HOME/.local/bin/cursor-agent" ] || return 1
-  [ "$BIN" = "$HOME/.local/bin" ] || link cursor-agent "$HOME/.local/bin/cursor-agent"
+  [ -x "$IHOME/.local/bin/cursor-agent" ] || in_ihome _agent_cap bash -c 'curl -fsS https://cursor.com/install | bash' >/dev/null || return 1
+  [ -x "$IHOME/.local/bin/cursor-agent" ] || return 1
+  [ "$BIN" = "$IHOME/.local/bin" ] || link cursor-agent "$IHOME/.local/bin/cursor-agent"
 }
 
 agent_gemini() {

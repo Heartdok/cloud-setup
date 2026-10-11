@@ -14,13 +14,19 @@
 # (/opt/cloud-setup as root, else ~/.local/share/cloud-setup) and runs that copy, so the modules
 # and libraries are on disk and stay in the snapshot.
 #
+# Read-only HOME (Codex Cloud's setup: only /workspace and /tmp are writable): everything that
+# would go under ~ goes under one writable prefix instead, $CLOUD_SETUP_PREFIX, else
+# /workspace/.cloud (bin/, opt/, share/cloud-setup, share/cloud-env/), recorded in <prefix>/env and
+# named as prefix=<dir> in the summary line. A writable HOME (Claude Code, Cursor) changes nothing.
+#
 # Contract: it ALWAYS exits 0 (a failing setup script fails the whole sandbox), and it stops
 # starting new steps once CLOUD_SETUP_BUDGET seconds (default 240) are spent, killing a step that
 # overruns, because platforms stop caching a setup that takes about five minutes. Progress:
 #   $HOME/.local/share/cloud-env/setup-result   "running: <step> (since T)" while running, then
 #                                               "base=<sha>[ ERROR=<what went wrong>]"
 #   $HOME/.local/share/cloud-env/setup.log      everything the steps printed
-# (CLOUD_SETUP_RESULT / CLOUD_SETUP_LOG override the two paths.)
+# (CLOUD_SETUP_RESULT / CLOUD_SETUP_LOG override the two paths; <prefix>/share/cloud-env/ with a
+# read-only HOME.)
 #
 # Session-layer hand-off: with 1Password Connect configured (OP_CONNECT_HOST + OP_CONNECT_TOKEN in
 # the environment) and a repo that has scripts/cloud/env-setup.sh, that stub fetches the private
@@ -31,7 +37,19 @@ set +x
 SLUG="${CLOUD_SETUP_SLUG:-Heartdok/cloud-setup}"
 REF="${CLOUD_SETUP_REF:-main}"
 
-default_home() { if [ "$(id -u)" = 0 ]; then echo /opt/cloud-setup; else echo "$HOME/.local/share/cloud-setup"; fi; }
+# lib/common.sh cloud_prefix, repeated for the bootstrap (no library yet): the writable prefix when
+# HOME is read-only; fails when HOME is writable, and then nothing below changes.
+ro_prefix() {
+  [ -n "${HOME:-}" ] && [ -d "$HOME" ] && ! [ -w "$HOME" ] || return 1 # an existing, unwritable HOME only
+  if [ -n "${CLOUD_SETUP_PREFIX:-}" ]; then echo "$CLOUD_SETUP_PREFIX"; return 0; fi
+  local w="${CLOUD_SETUP_WORKSPACE:-/workspace}"
+  if [ -d "$w" ] && [ -w "$w" ]; then echo "$w/.cloud"; else echo "${TMPDIR:-/tmp}/.cloud"; fi
+}
+default_home() {
+  local p
+  if p="$(ro_prefix)"; then echo "$p/share/cloud-setup"
+  elif [ "$(id -u)" = 0 ]; then echo /opt/cloud-setup; else echo "$HOME/.local/share/cloud-setup"; fi
+}
 
 # Download this repo to $1 (replacing it only on success) and record its commit in $1/.commit.
 # GitHub's tarballs carry the commit id in their pax header, so no git and no API call is needed.
@@ -57,7 +75,8 @@ bootstrap() {
   if [ -f "$dest/setup.sh" ] && [ -f "$dest/lib/common.sh" ]; then
     CLOUD_SETUP_HOME="$dest" exec bash "$dest/setup.sh" "$@" </dev/null
   fi
-  local share="${CLOUD_ENV_SHARE:-$HOME/.local/share/cloud-env}"
+  local share p
+  if p="$(ro_prefix)"; then share="${CLOUD_ENV_SHARE:-$p/share/cloud-env}"; else share="${CLOUD_ENV_SHARE:-$HOME/.local/share/cloud-env}"; fi
   case " $* " in *" --fetch-only "*) ;; *)
     mkdir -p "$share" 2>/dev/null \
       && echo "ERROR=could not download $SLUG@$REF and no copy at $dest" > "${CLOUD_SETUP_RESULT:-$share/setup-result}" ;;
@@ -85,7 +104,8 @@ run_step() { # name command...: one step, bounded by what is left of the budget;
 #   - only with Connect configured (OP_CONNECT_HOST and OP_CONNECT_TOKEN set); otherwise a no-op
 #   - the first repo with scripts/cloud/env-setup.sh runs it with --fetch-only: it fetches the
 #     layer (reading any credential it needs in memory) and records "<how> <dir>" in
-#     ~/.cloud-env.source
+#     ~/.cloud-env.source (<prefix>/share/cloud-env/source with a read-only HOME; the prefix is
+#     passed to the stub as CLOUD_SETUP_PREFIX)
 #   - <dir>/install-time.sh --repo R... installs what needs no secret (wrappers, helpers)
 # Nothing here reads or writes a secret. A failure is named in setup-result ("session layer: …")
 # but is not a failed step: a session must not re-run the toolchain installer because of it.
@@ -99,14 +119,17 @@ handoff() {
     [ -z "$stub" ] && [ -f "$r/scripts/cloud/env-setup.sh" ] && stub="$r/scripts/cloud/env-setup.sh"
   done <<< "$REPOS"
   [ -n "$stub" ] || { echo "session layer: Connect set, but no repo has scripts/cloud/env-setup.sh; skipped" >> "$LOG"; return 0; }
+  # shellcheck disable=SC2088 # a label, not a path
+  local mark="$HOME/.cloud-env.source" shown="~/.cloud-env.source"
+  if [ "$RO_HOME" = 1 ]; then mark="$SHARE/source"; shown="$mark"; export CLOUD_SETUP_PREFIX="$CLOUD_PREFIX"; fi
   # shellcheck disable=SC2016 # expanded by the step's own shell
   run_step "$name" bash -c '
-    stub="$1"; shift
+    stub="$1" mark="$2" shown="$3"; shift 3
     bash "$stub" --fetch-only
-    base="$(awk "{print \$2}" "$HOME/.cloud-env.source" 2>/dev/null)"
-    [ -n "$base" ] || { echo "session layer: not fetched (no ~/.cloud-env.source)"; exit 3; }
+    base="$(awk "{print \$2}" "$mark" 2>/dev/null)"
+    [ -n "$base" ] || { echo "session layer: not fetched (no $shown)"; exit 3; }
     [ -f "$base/install-time.sh" ] || { echo "session layer: $base has no install-time.sh"; exit 4; }
-    bash "$base/install-time.sh" "$@"' _ "$stub" "${args[@]}"
+    bash "$base/install-time.sh" "$@"' _ "$stub" "$mark" "$shown" "${args[@]}"
   case " $failed " in *" $name "*) failed="${failed/ $name/}"; errors+=("session layer: not installed (log: $LOG)") ;; esac
   case " $skipped " in *" $name "*) skipped="${skipped/ $name/}"; errors+=("session layer: not installed, out of time") ;; esac
   return 0
@@ -146,6 +169,9 @@ main() {
   base="$(head -c 7 "$here/.commit" 2>/dev/null)"
   case "$base" in ""|unknown) base="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo local)" ;; esac
   echo "cloud-setup base=$base repo=$(echo "$REPOS" | paste -sd' ' -) budget=${budget}s started $(date -u +%FT%TZ)" >> "$LOG"
+  # Read-only HOME: say where everything went, at a fixed path inside the prefix (`. <prefix>/env`).
+  [ "$RO_HOME" = 1 ] && printf '# cloud-setup: HOME is read-only, so tools live here. Use: . %s/env\nexport CLOUD_PREFIX=%q\nexport PATH="%s:$PATH"\n' \
+    "$CLOUD_PREFIX" "$CLOUD_PREFIX" "$BIN" > "$CLOUD_PREFIX/env"
 
   # The modules are the union of every repo's manifest.
   local -a errors=()
@@ -182,7 +208,7 @@ main() {
   [ -n "$skipped" ] && errors+=("steps cut by the ${budget}s budget:$skipped")
   [ ${#errors[@]} -gt 0 ] && err="$(printf '%s; ' "${errors[@]}")" && err="${err%; }"
   echo "base=$base${err:+ ERROR=$err}" > "$RESULT"
-  echo "cloud-setup:$summary secs=$(( $(date +%s) - t0 )) log=$LOG${err:+
+  echo "cloud-setup:$summary secs=$(( $(date +%s) - t0 ))${CLOUD_PREFIX:+ prefix=$CLOUD_PREFIX} log=$LOG${err:+
 cloud-setup: ERROR $err}" | tee -a "$LOG"
   exit 0
 }

@@ -3,6 +3,8 @@
 # a user-level SessionStart hook that runs a project's scripts/cloud/session-start.sh.
 # Without root or passwordless sudo, gh, jq, git-lfs and pandoc are pinned release binaries in
 # $BIN/$OPT (~/.local) instead, and missing system packages are left to the image and named once.
+# With a read-only HOME (Codex Cloud) $BIN/$OPT are the writable prefix (lib/common.sh), installers
+# that write to ~ get a scratch HOME there, and the SessionStart hook is skipped with a note.
 # shellcheck shell=bash
 
 setup() {
@@ -101,6 +103,9 @@ status() { echo "node=$(ver node --version) uv=$(ver uv --version) bun=$(ver bun
 CORE_SESSION_HOOK='[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0; p="${CLAUDE_PROJECT_DIR:-$PWD}"; grep -qs scripts/cloud/session-start.sh "$p/.claude/settings.json" && exit 0; for d in "$p" /home/*/* /root/*; do [ -f "$d/scripts/cloud/session-start.sh" ] && { bash "$d/scripts/cloud/session-start.sh"; break; }; done; true # cloud-setup'
 core_session_hook() {
   local s="$HOME/.claude/settings.json"
+  if [ "$RO_HOME" = 1 ]; then # Codex Cloud: no Claude Code there, and ~/.claude cannot be written
+    echo "core: HOME is read-only; user-level Claude Code SessionStart hook skipped"; return 0
+  fi
   mkdir -p "$HOME/.claude"; [ -s "$s" ] || echo '{}' > "$s"
   jq --arg c "$CORE_SESSION_HOOK" '
     .hooks.SessionStart = ([.hooks.SessionStart // [] | .[]
@@ -113,7 +118,7 @@ core_session_hook() {
 
 core_uv() {
   [ "$(ver uv --version)" = "$UV_PIN" ] && return 0
-  curl -LsSf "https://astral.sh/uv/${UV_PIN}/install.sh" | env UV_INSTALL_DIR="$BIN" UV_NO_MODIFY_PATH=1 sh
+  curl -LsSf "https://astral.sh/uv/${UV_PIN}/install.sh" | in_ihome env UV_INSTALL_DIR="$BIN" UV_NO_MODIFY_PATH=1 sh
   hash -r; [ "$(ver uv --version)" = "$UV_PIN" ]
 }
 
@@ -142,7 +147,7 @@ SH
 
 core_bun() {
   [ "$(bun --version 2>/dev/null)" = "$BUN_PIN" ] && return 0
-  curl -fsSL https://bun.sh/install | env BUN_INSTALL="$OPT/bun" bash -s -- "bun-v${BUN_PIN}" \
+  curl -fsSL https://bun.sh/install | in_ihome env BUN_INSTALL="$OPT/bun" bash -s -- "bun-v${BUN_PIN}" \
     && link bun "$OPT/bun/bin/bun" && link bunx "$OPT/bun/bin/bun"
   hash -r; [ "$(bun --version)" = "$BUN_PIN" ]
 }
