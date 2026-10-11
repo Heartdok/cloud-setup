@@ -6,7 +6,7 @@
 #
 #   bash setup.sh [--repo DIR]   # core + the modules in DIR/scripts/cloud/manifest + its setup.local.sh;
 #                                # repeatable. Without it: every cloned repo that has a manifest
-#                 [--no-local]   # skip the repo's scripts/cloud/setup.local.sh
+#                 [--no-local]   # skip the repo's scripts/cloud/setup.local.sh and the session-layer hand-off
 #                 [--fetch-only] # only download this repo to its home (below), install nothing
 #                 [--list]       # known modules
 #
@@ -21,6 +21,10 @@
 #                                               "base=<sha>[ ERROR=<what went wrong>]"
 #   $HOME/.local/share/cloud-env/setup.log      everything the steps printed
 # (CLOUD_SETUP_RESULT / CLOUD_SETUP_LOG override the two paths.)
+#
+# Session-layer hand-off: with 1Password Connect configured (OP_CONNECT_HOST + OP_CONNECT_TOKEN in
+# the environment) and a repo that has scripts/cloud/env-setup.sh, that stub fetches the private
+# session layer (--fetch-only) and the layer's install-time.sh runs. See handoff() below.
 set -uo pipefail
 set +x
 
@@ -75,6 +79,37 @@ run_step() { # name command...: one step, bounded by what is left of the budget;
     124|137) summary+=" $name=timeout"; skipped+=" $name" ;;
     *) summary+=" $name=failed($rc)"; failed+=" $name" ;;
   esac
+}
+
+# The hand-off to a private session layer, which this public repo knows only by its contract:
+#   - only with Connect configured (OP_CONNECT_HOST and OP_CONNECT_TOKEN set); otherwise a no-op
+#   - the first repo with scripts/cloud/env-setup.sh runs it with --fetch-only: it fetches the
+#     layer (reading any credential it needs in memory) and records "<how> <dir>" in
+#     ~/.cloud-env.source
+#   - <dir>/install-time.sh --repo R... installs what needs no secret (wrappers, helpers)
+# Nothing here reads or writes a secret. A failure is named in setup-result ("session layer: …")
+# but is not a failed step: a session must not re-run the toolchain installer because of it.
+handoff() {
+  local r stub="" name=session-layer
+  local -a args=()
+  [ -n "${OP_CONNECT_HOST:-}" ] && [ -n "${OP_CONNECT_TOKEN:-}" ] || return 0
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    args+=(--repo "$r")
+    [ -z "$stub" ] && [ -f "$r/scripts/cloud/env-setup.sh" ] && stub="$r/scripts/cloud/env-setup.sh"
+  done <<< "$REPOS"
+  [ -n "$stub" ] || { echo "session layer: Connect set, but no repo has scripts/cloud/env-setup.sh; skipped" >> "$LOG"; return 0; }
+  # shellcheck disable=SC2016 # expanded by the step's own shell
+  run_step "$name" bash -c '
+    stub="$1"; shift
+    bash "$stub" --fetch-only
+    base="$(awk "{print \$2}" "$HOME/.cloud-env.source" 2>/dev/null)"
+    [ -n "$base" ] || { echo "session layer: not fetched (no ~/.cloud-env.source)"; exit 3; }
+    [ -f "$base/install-time.sh" ] || { echo "session layer: $base has no install-time.sh"; exit 4; }
+    bash "$base/install-time.sh" "$@"' _ "$stub" "${args[@]}"
+  case " $failed " in *" $name "*) failed="${failed/ $name/}"; errors+=("session layer: not installed (log: $LOG)") ;; esac
+  case " $skipped " in *" $name "*) skipped="${skipped/ $name/}"; errors+=("session layer: not installed, out of time") ;; esac
+  return 0
 }
 
 main() {
@@ -140,6 +175,8 @@ main() {
     done <<< "$REPOS"
   fi
   rm -f "$APT_STAMP" "$manifest"
+  [ "$local_step" = 1 ] && handoff
+
 
   [ -n "$failed" ] && errors+=("steps failed:$failed")
   [ -n "$skipped" ] && errors+=("steps cut by the ${budget}s budget:$skipped")

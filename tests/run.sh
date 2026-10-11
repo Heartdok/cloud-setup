@@ -6,6 +6,7 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0; ok() { echo "  ✓ $*"; }; no() { echo "  ✗ $*"; fail=1; }
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 lib() { bash -c ". '$here/lib/common.sh'; $1"; }
+unset OP_CONNECT_HOST OP_CONNECT_TOKEN   # the session-layer hand-off is tested on purpose, below
 
 # Manifest
 printf '# comment\noffice  blender-mcp\npython # trailing\nexcel-native\n' > "$t/manifest"
@@ -63,6 +64,30 @@ grep -q 'no manifest' "$F/home/.local/share/cloud-env/setup-result" && ok "no ma
 printf 'good\n' > "$F/repo/scripts/cloud/manifest"; rm "$F/repo/scripts/cloud/setup.local.sh"; run >/dev/null
 [ "$(cut -c1-5 "$F/home/.local/share/cloud-env/setup-result")" = base= ] && ! grep -q ERROR "$F/home/.local/share/cloud-env/setup-result" \
   && ok "clean run: base=<sha>, no ERROR" || no "clean: $(cat "$F/home/.local/share/cloud-env/setup-result")"
+# Session-layer hand-off: only with Connect configured; the repo's stub fetches (--fetch-only) and
+# records the layer in ~/.cloud-env.source, then the layer's install-time.sh runs. Never fatal, and a
+# failure is named without counting as a failed step (which would make sessions re-run the installer).
+H="$F/home"; HL="$t/layer"; mkdir -p "$HL"
+printf 'echo "stub $*" >> "%s/calls"; [ -n "${STUB_FAIL:-}" ] || echo "clone %s" > "$HOME/.cloud-env.source"\n' "$t" "$HL" > "$F/repo/scripts/cloud/env-setup.sh"
+printf 'echo "install-time $*" >> "%s/calls"; exit "${IT_RC:-0}"\n' "$t" > "$HL/install-time.sh"
+hres() { cat "$H/.local/share/cloud-env/setup-result"; }
+rm -f "$t/calls"; run >/dev/null
+[ ! -e "$t/calls" ] && ! grep -q "session layer" <<<"$(hres)" && ok "hand-off: no Connect → no-op" || no "hand-off ran without Connect: $(cat "$t/calls")"
+out="$(OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t run)"; rc=$?
+[ $rc = 0 ] && [ "$(paste -sd'|' "$t/calls")" = "stub --fetch-only|install-time --repo $F/repo" ] && grep -q 'session-layer=ok' <<<"$out" \
+  && ! grep -q ERROR "$H/.local/share/cloud-env/setup-result" && ok "hand-off: with Connect, stub --fetch-only then install-time.sh --repo" || no "hand-off: rc=$rc $out / $(cat "$t/calls")"
+rm -f "$t/calls"; OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t run --no-local >/dev/null
+[ ! -e "$t/calls" ] && ok "hand-off: --no-local skips it (a session's repair run)" || no "hand-off ran with --no-local"
+rm -f "$t/calls" "$H/.cloud-env.source"; out="$(OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t STUB_FAIL=1 run)"; rc=$?
+[ $rc = 0 ] && grep -q 'ERROR=session layer: not installed' <<<"$(hres)" && ! grep -q 'steps failed' <<<"$(hres)" && ! grep -q install-time "$t/calls" \
+  && ok "hand-off: fetch fails → exit 0, named, not a failed step" || no "hand-off fetch failure: rc=$rc $(hres)"
+out="$(OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t IT_RC=5 run)"; rc=$?
+[ $rc = 0 ] && grep -q 'session-layer=failed(5)' <<<"$out" && grep -q 'ERROR=session layer: not installed' <<<"$(hres)" && ! grep -q 'steps failed' <<<"$(hres)" \
+  && ok "hand-off: install-time.sh fails → exit 0, named" || no "hand-off install-time failure: rc=$rc $out"
+rm -f "$HL/install-time.sh"; OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t run >/dev/null
+grep -q 'session layer: not installed' <<<"$(hres)" && grep -q "has no install-time.sh" "$H/.local/share/cloud-env/setup.log" \
+  && ok "hand-off: a layer without install-time.sh is named" || no "hand-off old layer: $(hres)"
+rm -f "$F/repo/scripts/cloud/env-setup.sh" "$H/.cloud-env.source"; rm -rf "$HL"
 # Several repos cloned side by side: the union of their manifests, each repo's setup.local.sh.
 mkdir -p "$F/r2/a/scripts/cloud" "$F/r2/b/scripts/cloud"
 printf 'good\n' > "$F/r2/a/scripts/cloud/manifest"; printf 'zlate good\n' > "$F/r2/b/scripts/cloud/manifest"
