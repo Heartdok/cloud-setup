@@ -52,13 +52,17 @@ ver() { "$@" 2>/dev/null | head -1 | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head
 
 # The project repos, one per line: every candidate holding scripts/cloud/manifest (a session can
 # clone several projects side by side, and each gets what its manifest names), else the first git
-# repo, else $PWD. Candidates, in order: the git toplevel of $PWD, $PWD, then every directory
-# matching CLOUD_SETUP_ROOTS (default "/home/*/* /root/*": where sandboxes clone projects).
+# repo, else $PWD. Candidates, in order: the git toplevel of $PWD, $PWD, the toplevel's siblings and
+# $PWD's children (multi-repo sandboxes clone projects side by side, under a layout that is not
+# always documented: Codex Cloud), then every directory matching CLOUD_SETUP_ROOTS (default
+# "/workspace/* /home/*/* /root/*": where sandboxes clone projects).
 discover_repos() {
-  local d top real first="" seen=":" roots="${CLOUD_SETUP_ROOTS:-/home/*/* /root/*}"
+  local d top real first="" seen=":" roots="${CLOUD_SETUP_ROOTS:-/workspace/* /home/*/* /root/*}"
   local -a cands=()
   top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" && cands+=("$top")
   cands+=("$PWD")
+  [ -n "$top" ] && cands+=("$(dirname "$top")"/*)
+  cands+=("$PWD"/*)
   # shellcheck disable=SC2206 # the roots are globs
   cands+=($roots)
   for d in "${cands[@]}"; do

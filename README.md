@@ -34,8 +34,10 @@ From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]`.
 
 ## Finding the project
 Every candidate that contains `scripts/cloud/manifest` is a project: the git toplevel of the current
-directory, the current directory, then each directory matching `/home/*/*` and `/root/*` (override
-with `CLOUD_SETUP_ROOTS`). A sandbox that clones several repos side by side gets the union of their
+directory, the current directory, the toplevel's sibling directories and the current directory's
+children (multi-repo sandboxes such as Codex Cloud clone side by side under an undocumented root),
+then each directory matching `/workspace/*`, `/home/*/*` and `/root/*` (override with
+`CLOUD_SETUP_ROOTS`). A sandbox that clones several repos side by side gets the union of their
 manifests, and each repo's `setup.local.sh` runs (steps `local:<repo>`); per-repo modules (`node`,
 `python`) act on the repos that list them, and the first repo that pins Bun sets its version.
 Without a manifest anywhere, the first git repository found, else the current directory, gets `core`
