@@ -25,6 +25,12 @@ disc() { (cd "$1" && CLOUD_SETUP_ROOTS="${2:-$t/home/*/*}" bash -c ". '$here/lib
 [ "$(disc "$t/empty")" = "$t/home/u/proj" ] && ok "discover: first repo with a manifest under the roots" || no "discover roots: $(disc "$t/empty")"
 [ "$(disc "$t/empty" "$t/home/u/gitonly $t/home/u/plain")" = "$t/home/u/gitonly" ] && ok "discover: else the first git repo" || no "discover git: $(disc "$t/empty" "$t/home/u/gitonly")"
 [ "$(disc "$t/empty" "$t/nowhere/*")" = "$t/empty" ] && ok "discover: else \$PWD" || no "discover pwd"
+mkdir -p "$t/home/u/zproj/scripts/cloud"; touch "$t/home/u/zproj/scripts/cloud/manifest"
+discs() { (cd "$1" && CLOUD_SETUP_ROOTS="${2:-$t/home/*/*}" bash -c ". '$here/lib/common.sh'; discover_repos" | paste -sd' '); }
+[ "$(discs "$t/empty")" = "$t/home/u/proj $t/home/u/zproj" ] && ok "discover: every repo with a manifest, in order" || no "discover all: $(discs "$t/empty")"
+[ "$(discs "$t/home/u/proj/sub")" = "$(cd "$t/home/u/proj" && pwd -P) $t/home/u/zproj" ] && ok "discover: a repo found twice is listed once" || no "discover dedup: $(discs "$t/home/u/proj/sub")"
+[ "$(disc "$t/empty")" = "$t/home/u/proj" ] && ok "discover_repo: still the first" || no "discover_repo first"
+rm -rf "$t/home/u/zproj"
 
 # The contract: fake modules in a copy of this repo. Exit 0, result + log written, every problem named.
 F="$t/fake"; mkdir -p "$F/modules" "$F/home" "$F/repo/scripts/cloud"
@@ -37,7 +43,7 @@ echo 'setup() { sleep 60; }' > "$F/modules/slow.sh"
 echo 'setup() { true; }' > "$F/modules/zlate.sh"
 printf 'good bad dies nope\n' > "$F/repo/scripts/cloud/manifest"
 printf 'echo local-ran; exit 1\n' > "$F/repo/scripts/cloud/setup.local.sh"
-run() { (cd "$F/repo" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_BUDGET="${BUDGET:-240}" bash "$F/setup.sh" "$@"); }
+run() { (cd "$F/repo" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_ROOTS="$F/none/*" CLOUD_SETUP_BUDGET="${BUDGET:-240}" bash "$F/setup.sh" "$@"); }
 out="$(run)"; rc=$?
 res="$(cat "$F/home/.local/share/cloud-env/setup-result" 2>/dev/null)"
 [ $rc = 0 ] && ok "exits 0 although steps fail" || no "exit code $rc"
@@ -51,6 +57,23 @@ grep -q 'no manifest' "$F/home/.local/share/cloud-env/setup-result" && ok "no ma
 printf 'good\n' > "$F/repo/scripts/cloud/manifest"; rm "$F/repo/scripts/cloud/setup.local.sh"; run >/dev/null
 [ "$(cut -c1-5 "$F/home/.local/share/cloud-env/setup-result")" = base= ] && ! grep -q ERROR "$F/home/.local/share/cloud-env/setup-result" \
   && ok "clean run: base=<sha>, no ERROR" || no "clean: $(cat "$F/home/.local/share/cloud-env/setup-result")"
+# Several repos cloned side by side: the union of their manifests, each repo's setup.local.sh.
+mkdir -p "$F/r2/a/scripts/cloud" "$F/r2/b/scripts/cloud"
+printf 'good\n' > "$F/r2/a/scripts/cloud/manifest"; printf 'zlate good\n' > "$F/r2/b/scripts/cloud/manifest"
+printf 'echo a-local\n' > "$F/r2/a/scripts/cloud/setup.local.sh"; printf 'echo b-local\n' > "$F/r2/b/scripts/cloud/setup.local.sh"
+out="$(cd "$F/r2" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_ROOTS="$F/r2/*" bash "$F/setup.sh")"
+grep -q 'core=ok good=ok zlate=ok local:a=ok local:b=ok' <<<"$out" && ! grep -q ERROR "$F/home/.local/share/cloud-env/setup-result" \
+  && ok "several repos: union of manifests, every setup.local.sh" || no "several repos: $out"
+out="$(cd "$F/r2" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_ROOTS="$F/none/*" bash "$F/setup.sh" --repo "$F/r2/b" --repo "$F/r2/a")"
+grep -q 'core=ok good=ok zlate=ok local:b=ok local:a=ok' <<<"$out" && ok "--repo is repeatable" || no "--repo twice: $out"
+mkdir -p "$F/r2/a/n" "$F/r2/b/n"; printf 'node\n' >> "$F/r2/b/scripts/cloud/manifest"
+[ "$(REPO="$F/r2/a" REPOS="$F/r2/a
+$F/r2/b" bash -c ". '$here/lib/common.sh'; repos_wanting node")" = "$F/r2/b" ] && ok "per-repo modules act only on the repos that list them" || no "repos_wanting"
+[ "$(REPO="$F/r2/a" REPOS="$F/r2/a" bash -c ". '$here/lib/common.sh'; repos_wanting node")" = "$F/r2/a" ] && ok "one repo: per-repo modules act on it" || no "repos_wanting single"
+mkdir -p "$t/pin2/a" "$t/pin2/b"; echo 1.2.3 > "$t/pin2/b/.bun-version"
+[ "$(REPO="$t/pin2/a" REPOS="$t/pin2/a
+$t/pin2/b" bash -c ". '$here/lib/common.sh'; echo \$BUN_PIN")" = 1.2.3 ] && ok "several repos: the first Bun pin wins" || no "bun pin across repos"
+
 if command -v timeout >/dev/null; then
   printf 'slow zlate\n' > "$F/repo/scripts/cloud/manifest"; s=$(date +%s)
   out="$(BUDGET=12 run)"; rc=$?; d=$(( $(date +%s) - s ))
@@ -97,7 +120,7 @@ mkdir -p "$t/hkrun/r/scripts/cloud" "$t/hkrun/r/.claude"
 echo 'echo ran' > "$t/hkrun/r/scripts/cloud/session-start.sh"
 cmd="$(jq -r '.hooks.SessionStart[-1].hooks[0].command' "$hk")"
 [ "$(cd "$t/hkrun/r" && CLAUDE_CODE_REMOTE=true bash -c "$cmd")" = ran ] && ok "session hook runs the project's session-start" || no "session hook did not run"
-[ -z "$(cd "$t/hkrun/r" && bash -c "$cmd")" ] && ok "session hook is a no-op outside remote sessions" || no "session hook ran locally"
+[ -z "$(cd "$t/hkrun/r" && env -u CLAUDE_CODE_REMOTE bash -c "$cmd")" ] && ok "session hook is a no-op outside remote sessions" || no "session hook ran locally"
 echo '{"hooks":{"SessionStart":[{"hooks":[{"command":"bash scripts/cloud/session-start.sh"}]}]}}' > "$t/hkrun/r/.claude/settings.json"
 [ -z "$(cd "$t/hkrun/r" && CLAUDE_CODE_REMOTE=true bash -c "$cmd")" ] && ok "session hook defers to the project's own hook" || no "session hook double-runs"
 

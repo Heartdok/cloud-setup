@@ -4,7 +4,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Heartdok/cloud-setup/main/setup.sh | bash || true
 #
-#   bash setup.sh [--repo DIR]   # core + the modules in DIR/scripts/cloud/manifest + its setup.local.sh
+#   bash setup.sh [--repo DIR]   # core + the modules in DIR/scripts/cloud/manifest + its setup.local.sh;
+#                                # repeatable. Without it: every cloned repo that has a manifest
 #                 [--no-local]   # skip the repo's scripts/cloud/setup.local.sh
 #                 [--fetch-only] # only download this repo to its home (below), install nothing
 #                 [--list]       # known modules
@@ -77,9 +78,10 @@ run_step() { # name command...: one step, bounded by what is left of the budget;
 }
 
 main() {
-  local here="$1" repo="${CLOUD_SETUP_REPO:-}" local_step=1 m; shift
+  local here="$1" repos="${CLOUD_SETUP_REPO:-}" local_step=1 m r; shift
   while [ $# -gt 0 ]; do case "$1" in
-    --repo) repo="${2:-}"; shift 2 ;;
+    --repo) [ -z "${2:-}" ] || repos="${repos:+$repos
+}$2"; shift 2 ;;
     --no-local) local_step=0; shift ;;
     --fetch-only) exit 0 ;;   # we are a checkout already
     --list) export CLOUD_SETUP_HOME="$here"
@@ -93,7 +95,8 @@ main() {
   export CLOUD_SETUP_HOME="$here"
   # shellcheck source=lib/common.sh
   . "$here/lib/common.sh"
-  REPO="${repo:-$(discover_repo)}"; export REPO
+  # Every repo the session cloned that has a manifest (one per line); REPO is the first.
+  REPOS="${repos:-$(discover_repos)}"; REPO="${REPOS%%$'\n'*}"; export REPOS REPO
   repo_pins
 
   local t0 budget manifest base err=""
@@ -107,15 +110,20 @@ main() {
   export LOG
   base="$(head -c 7 "$here/.commit" 2>/dev/null)"
   case "$base" in ""|unknown) base="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo local)" ;; esac
-  echo "cloud-setup base=$base repo=$REPO budget=${budget}s started $(date -u +%FT%TZ)" >> "$LOG"
+  echo "cloud-setup base=$base repo=$(echo "$REPOS" | paste -sd' ') budget=${budget}s started $(date -u +%FT%TZ)" >> "$LOG"
 
+  # The modules are the union of every repo's manifest.
   local -a errors=()
-  manifest="$REPO/scripts/cloud/manifest"
-  if [ ! -f "$manifest" ]; then
-    errors+=("no manifest at $manifest (core only)")
-  elif ! bad="$(validate_manifest "$manifest")"; then
-    errors+=("unknown module(s): $(echo "$bad" | tr '\n' ' ')— known: $(known_modules | tr '\n' ' ')")
-  fi
+  manifest="$(mktemp "${TMPDIR:-/tmp}/cloud-setup-manifest.XXXXXX")"
+  while IFS= read -r r; do
+    if [ ! -f "$r/scripts/cloud/manifest" ]; then
+      errors+=("no manifest at $r/scripts/cloud/manifest (core only)")
+    else
+      bad="$(validate_manifest "$r/scripts/cloud/manifest")" \
+        || errors+=("unknown module(s): $(echo "$bad" | tr '\n' ' ')— known: $(known_modules | tr '\n' ' ')")
+      cat "$r/scripts/cloud/manifest" >> "$manifest"; echo >> "$manifest"
+    fi
+  done <<< "$REPOS"
 
   # One apt-get update per run, shared by the steps (each runs in its own process).
   APT_STAMP="$(mktemp -u "${TMPDIR:-/tmp}/cloud-setup-apt.XXXXXX")"; export APT_STAMP
@@ -123,11 +131,15 @@ main() {
     # shellcheck disable=SC2016 # expanded by the step's own shell
     run_step "$m" bash -c '. "$CLOUD_SETUP_HOME/lib/common.sh"; run_module setup "$1"' _ "$m"
   done
-  # Repo-specific extras stay in the repo.
-  if [ "$local_step" = 1 ] && [ -f "$REPO/scripts/cloud/setup.local.sh" ]; then
-    run_step local bash "$REPO/scripts/cloud/setup.local.sh"
+  # Repo-specific extras stay in the repo: each repo's, named local (local:<repo> with several).
+  if [ "$local_step" = 1 ]; then
+    while IFS= read -r r; do
+      [ -f "$r/scripts/cloud/setup.local.sh" ] || continue
+      if [ "$REPO" = "$REPOS" ]; then m=local; else m="local:$(basename "$r")"; fi
+      run_step "$m" bash "$r/scripts/cloud/setup.local.sh"
+    done <<< "$REPOS"
   fi
-  rm -f "$APT_STAMP"
+  rm -f "$APT_STAMP" "$manifest"
 
   [ -n "$failed" ] && errors+=("steps failed:$failed")
   [ -n "$skipped" ] && errors+=("steps cut by the ${budget}s budget:$skipped")
