@@ -26,11 +26,17 @@ disc() { (cd "$1" && CLOUD_SETUP_ROOTS="${2:-$t/home/*/*}" bash -c ". '$here/lib
 [ "$(disc "$t/empty" "$t/home/u/gitonly $t/home/u/plain")" = "$t/home/u/gitonly" ] && ok "discover: else the first git repo" || no "discover git: $(disc "$t/empty" "$t/home/u/gitonly")"
 [ "$(disc "$t/empty" "$t/nowhere/*")" = "$t/empty" ] && ok "discover: else \$PWD" || no "discover pwd"
 mkdir -p "$t/home/u/zproj/scripts/cloud"; touch "$t/home/u/zproj/scripts/cloud/manifest"
-discs() { (cd "$1" && CLOUD_SETUP_ROOTS="${2:-$t/home/*/*}" bash -c ". '$here/lib/common.sh'; discover_repos" | paste -sd' '); }
+discs() { (cd "$1" && CLOUD_SETUP_ROOTS="${2:-$t/home/*/*}" bash -c ". '$here/lib/common.sh'; discover_repos" | paste -sd' ' -); }
 [ "$(discs "$t/empty")" = "$t/home/u/proj $t/home/u/zproj" ] && ok "discover: every repo with a manifest, in order" || no "discover all: $(discs "$t/empty")"
-[ "$(discs "$t/home/u/proj/sub")" = "$(cd "$t/home/u/proj" && pwd -P) $t/home/u/zproj" ] && ok "discover: a repo found twice is listed once" || no "discover dedup: $(discs "$t/home/u/proj/sub")"
+[ "$(discs "$t/home/u/proj/sub")" = "$(cd "$t/home/u/proj" && pwd -P) $(cd "$t/home/u/zproj" && pwd -P)" ] && ok "discover: a repo found twice is listed once" || no "discover dedup: $(discs "$t/home/u/proj/sub")"
 [ "$(disc "$t/empty")" = "$t/home/u/proj" ] && ok "discover_repo: still the first" || no "discover_repo first"
 rm -rf "$t/home/u/zproj"
+# Multi-repo sandboxes (Codex Cloud) clone side by side under an undocumented root: the toplevel's
+# siblings and $PWD's children count, with no roots at all.
+mkdir -p "$t/ws/a/scripts/cloud" "$t/ws/b/scripts/cloud" "$t/ws/c"
+touch "$t/ws/a/scripts/cloud/manifest" "$t/ws/b/scripts/cloud/manifest"; git -C "$t/ws/a" init -q
+[ "$(discs "$t/ws/a" "$t/nowhere/*")" = "$(cd "$t/ws/a" && pwd -P) $(cd "$t/ws/b" && pwd -P)" ] && ok "discover: sibling repos of the toplevel" || no "discover siblings: $(discs "$t/ws/a" "$t/nowhere/*")"
+[ "$(discs "$t/ws" "$t/nowhere/*")" = "$t/ws/a $t/ws/b" ] && ok "discover: repos under \$PWD" || no "discover children: $(discs "$t/ws" "$t/nowhere/*")"
 
 # The contract: fake modules in a copy of this repo. Exit 0, result + log written, every problem named.
 F="$t/fake"; mkdir -p "$F/modules" "$F/home" "$F/repo/scripts/cloud"
