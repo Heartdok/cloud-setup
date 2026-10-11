@@ -9,13 +9,16 @@ export CLOUD_SETUP_HOME="${CLOUD_SETUP_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}"
 . "$CLOUD_SETUP_HOME/pins.env"
 
 # A repo's own Bun pin wins over pins.env: .bun-version, else package.json "packageManager": "bun@X".
+# With several repos ($REPOS, one per line), the first that pins Bun wins.
 repo_pins() {
-  [ -n "${REPO:-}" ] || return 0
-  local rb
-  rb="$( { tr -d '[:space:]' < "$REPO/.bun-version"; } 2>/dev/null)"
-  [ -n "$rb" ] || rb="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"bun@\([0-9][0-9.]*\)".*/\1/p' "$REPO/package.json" 2>/dev/null | head -1)"
-  # shellcheck disable=SC2034 # read by modules/core.sh
-  [ -z "$rb" ] || BUN_PIN="${rb#v}"
+  local r rb
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    rb="$( { tr -d '[:space:]' < "$r/.bun-version"; } 2>/dev/null)"
+    [ -n "$rb" ] || rb="$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"bun@\([0-9][0-9.]*\)".*/\1/p' "$r/package.json" 2>/dev/null | head -1)"
+    # shellcheck disable=SC2034 # read by modules/core.sh
+    [ -z "$rb" ] || { BUN_PIN="${rb#v}"; return 0; }
+  done <<< "${REPOS:-${REPO:-}}"
 }
 repo_pins
 
@@ -47,11 +50,12 @@ apt_install() { # packages...: quiet, idempotent; no apt-get at all when everyth
 
 ver() { "$@" 2>/dev/null | head -1 | grep -Eo '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1; }
 
-# The project repo: the first candidate holding scripts/cloud/manifest, else the first git repo,
-# else $PWD. Candidates: the git toplevel of $PWD, $PWD, then every directory matching
-# CLOUD_SETUP_ROOTS (default "/home/*/* /root/*": where sandboxes clone projects).
-discover_repo() {
-  local d top first="" roots="${CLOUD_SETUP_ROOTS:-/home/*/* /root/*}"
+# The project repos, one per line: every candidate holding scripts/cloud/manifest (a session can
+# clone several projects side by side, and each gets what its manifest names), else the first git
+# repo, else $PWD. Candidates, in order: the git toplevel of $PWD, $PWD, then every directory
+# matching CLOUD_SETUP_ROOTS (default "/home/*/* /root/*": where sandboxes clone projects).
+discover_repos() {
+  local d top real first="" seen=":" roots="${CLOUD_SETUP_ROOTS:-/home/*/* /root/*}"
   local -a cands=()
   top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" && cands+=("$top")
   cands+=("$PWD")
@@ -59,11 +63,16 @@ discover_repo() {
   cands+=($roots)
   for d in "${cands[@]}"; do
     [ -d "$d" ] || continue
-    [ -f "$d/scripts/cloud/manifest" ] && { echo "$d"; return 0; }
+    if [ -f "$d/scripts/cloud/manifest" ]; then
+      real="$(cd "$d" && pwd -P)"
+      case "$seen" in *":$real:"*) continue ;; esac
+      seen="$seen$real:"; echo "$d"
+    fi
     [ -z "$first" ] && [ -e "$d/.git" ] && first="$d"
   done
-  echo "${first:-$PWD}"
+  [ "$seen" != ":" ] || echo "${first:-$PWD}"
 }
+discover_repo() { discover_repos | head -1; } # the first of them
 
 # Module registry: every modules/<name>.sh is a module; there is no other list.
 module_exists() { [ -f "$CLOUD_SETUP_HOME/modules/$1.sh" ]; }
@@ -73,6 +82,21 @@ requires_of() { sed -n 's/^requires="\(.*\)"/\1/p' "$CLOUD_SETUP_HOME/modules/$1
 
 # Manifest: whitespace/newline separated module names, '#' comments.
 read_manifest() { [ -f "$1" ] && sed 's/#.*//' "$1" | tr -s ' \t' '\n' | grep -v '^$' | sort -u; }
+
+# The repos a per-repo module (node, python) acts on: with one repo, that repo; with several
+# ($REPOS), each whose manifest names the module.
+repos_wanting() { # module
+  local r
+  if [ -z "${REPOS:-}" ] || [ "${REPOS:-}" = "${REPO:-}" ]; then echo "${REPO:-}"; return 0; fi
+  while IFS= read -r r; do read_manifest "$r/scripts/cloud/manifest" | grep -qx "$1" && echo "$r"; done <<< "$REPOS"
+  return 0
+}
+# Run "$@" in each repo that wants the module; non-zero if any run fails.
+in_repos_wanting() { # module command...
+  local m="$1" r rc=0; shift
+  while IFS= read -r r; do [ -n "$r" ] || continue; (cd "$r" && "$@") || rc=1; done < <(repos_wanting "$m")
+  return $rc
+}
 
 validate_manifest() { # file → prints unknown names; returns 1 if any
   local bad; bad="$(comm -23 <(read_manifest "$1") <(known_modules))"

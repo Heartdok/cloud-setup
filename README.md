@@ -13,8 +13,8 @@ curl -fsSL https://raw.githubusercontent.com/Heartdok/cloud-setup/main/setup.sh 
 ```
 
 It downloads this repository anonymously (a tarball; no git, no credentials) to `/opt/cloud-setup`
-(or `~/.local/share/cloud-setup` when not root), finds the project, and installs `core` plus every
-module the project's manifest names. `|| true` keeps the line safe even under a strict shell.
+(or `~/.local/share/cloud-setup` when not root), finds the projects, and installs `core` plus every
+module their manifests name. `|| true` keeps the line safe even under a strict shell.
 
 From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]`.
 
@@ -33,10 +33,13 @@ From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]`.
   run or was cut off, so a session-time layer can repair what is missing.
 
 ## Finding the project
-The first of these that contains `scripts/cloud/manifest` wins: the git toplevel of the current
+Every candidate that contains `scripts/cloud/manifest` is a project: the git toplevel of the current
 directory, the current directory, then each directory matching `/home/*/*` and `/root/*` (override
-with `CLOUD_SETUP_ROOTS`). Without a manifest anywhere, the first git repository found, else the
-current directory, gets `core` only. `--repo DIR` (or `CLOUD_SETUP_REPO`) skips the search.
+with `CLOUD_SETUP_ROOTS`). A sandbox that clones several repos side by side gets the union of their
+manifests, and each repo's `setup.local.sh` runs (steps `local:<repo>`); per-repo modules (`node`,
+`python`) act on the repos that list them, and the first repo that pins Bun sets its version.
+Without a manifest anywhere, the first git repository found, else the current directory, gets `core`
+only. `--repo DIR` (repeatable, or `CLOUD_SETUP_REPO`) skips the search.
 
 ## The manifest
 `scripts/cloud/manifest` in the project: module names separated by spaces or newlines, `#` starts a
