@@ -19,7 +19,8 @@ module their manifests name. `|| true` keeps the line safe even under a strict s
 Non-root without sudo (Codex Cloud) is supported for `core`: gh, jq, git-lfs and pandoc install as
 pinned user-space binaries in `~/.local`, and a module that needs apt fails by name.
 
-From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]`.
+From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]` (`--no-local` also skips the
+session-layer hand-off below).
 
 ## What it guarantees
 - **Exit 0, always.** A failed step is recorded, never fatal: a non-zero setup script would stop
@@ -79,6 +80,21 @@ same budget). A project's Bun version (`.bun-version`, or `"packageManager": "bu
 
 Nothing here signs in to anything or reads a secret: credentials don't exist yet when a setup script
 runs, and the snapshot would keep them. Sign-in belongs to a session-time step.
+
+## Session-layer hand-off
+A private session layer (secrets, sign-ins) cannot live in this public repo, and some platforms run
+nothing when a task starts (Codex Cloud). So when **1Password Connect is configured**
+(`OP_CONNECT_HOST` and `OP_CONNECT_TOKEN` set while the setup script runs) and a repo has
+`scripts/cloud/env-setup.sh`, the installer runs, after the modules:
+
+1. `bash <repo>/scripts/cloud/env-setup.sh --fetch-only`: the repo's stub fetches the layer and
+   records `<how> <dir>` in `~/.cloud-env.source`;
+2. `bash <dir>/install-time.sh --repo <repo>…`: the layer installs what needs no secret.
+
+This repo never reads a secret; the stub reads what it needs in memory, and the snapshot keeps none.
+Without Connect, or with `--no-local`, it does nothing. A failure is named in `setup-result`
+(`session layer: …`) and is not a failed step. The private parts stay in
+[Heartdok/cloud-env](https://github.com/Heartdok/cloud-env).
 
 Versions live in `pins.env`; a weekly workflow (`scripts/bump-pins.sh`) opens a PR to refresh them.
 
