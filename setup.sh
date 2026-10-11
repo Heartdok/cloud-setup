@@ -102,7 +102,8 @@ run_step() { # name command...: one step, bounded by what is left of the budget;
 
 # The hand-off to a private session layer, which this public repo knows only by its contract:
 #   - only with Connect configured (OP_CONNECT_HOST and OP_CONNECT_TOKEN set); otherwise a no-op
-#   - the first repo with scripts/cloud/env-setup.sh runs it with --fetch-only: it fetches the
+#   - each repo's scripts/cloud/env-setup.sh, in order, runs with --fetch-only until one has
+#     recorded the layer (a repo can carry a stale stub from before a contract change): it fetches the
 #     layer (reading any credential it needs in memory) and records "<how> <dir>" in
 #     ~/.cloud-env.source (<prefix>/share/cloud-env/source with a read-only HOME; the prefix is
 #     passed to the stub as CLOUD_SETUP_PREFIX)
@@ -110,26 +111,32 @@ run_step() { # name command...: one step, bounded by what is left of the budget;
 # Nothing here reads or writes a secret. A failure is named in setup-result ("session layer: …")
 # but is not a failed step: a session must not re-run the toolchain installer because of it.
 handoff() {
-  local r stub="" name=session-layer
-  local -a args=()
+  local r name=session-layer
+  local -a args=() stubs=()
   [ -n "${OP_CONNECT_HOST:-}" ] && [ -n "${OP_CONNECT_TOKEN:-}" ] || return 0
   while IFS= read -r r; do
     [ -n "$r" ] || continue
     args+=(--repo "$r")
-    [ -z "$stub" ] && [ -f "$r/scripts/cloud/env-setup.sh" ] && stub="$r/scripts/cloud/env-setup.sh"
+    [ -f "$r/scripts/cloud/env-setup.sh" ] && stubs+=("$r/scripts/cloud/env-setup.sh")
   done <<< "$REPOS"
-  [ -n "$stub" ] || { echo "session layer: Connect set, but no repo has scripts/cloud/env-setup.sh; skipped" >> "$LOG"; return 0; }
+  [ "${#stubs[@]}" -gt 0 ] || { echo "session layer: Connect set, but no repo has scripts/cloud/env-setup.sh; skipped" >> "$LOG"; return 0; }
   # shellcheck disable=SC2088 # a label, not a path
   local mark="$HOME/.cloud-env.source" shown="~/.cloud-env.source"
   if [ "$RO_HOME" = 1 ]; then mark="$SHARE/source"; shown="$mark"; export CLOUD_SETUP_PREFIX="$CLOUD_PREFIX"; fi
   # shellcheck disable=SC2016 # expanded by the step's own shell
   run_step "$name" bash -c '
-    stub="$1" mark="$2" shown="$3"; shift 3
-    bash "$stub" --fetch-only
-    base="$(awk "{print \$2}" "$mark" 2>/dev/null)"
+    mark="$1" shown="$2" n="$3"; shift 3
+    base=""
+    for stub in "${@:1:$n}"; do
+      bash "$stub" --fetch-only
+      base="$(awk "{print \$2}" "$mark" 2>/dev/null)"
+      [ -n "$base" ] && break
+      echo "session layer: $stub recorded nothing in $shown"
+    done
+    shift "$n"
     [ -n "$base" ] || { echo "session layer: not fetched (no $shown)"; exit 3; }
     [ -f "$base/install-time.sh" ] || { echo "session layer: $base has no install-time.sh"; exit 4; }
-    bash "$base/install-time.sh" "$@"' _ "$stub" "$mark" "$shown" "${args[@]}"
+    bash "$base/install-time.sh" "$@"' _ "$mark" "$shown" "${#stubs[@]}" "${stubs[@]}" "${args[@]}"
   case " $failed " in *" $name "*) failed="${failed/ $name/}"; errors+=("session layer: not installed (log: $LOG)") ;; esac
   case " $skipped " in *" $name "*) skipped="${skipped/ $name/}"; errors+=("session layer: not installed, out of time") ;; esac
   return 0

@@ -103,6 +103,15 @@ grep -q 'core=ok good=ok zlate=ok local:a=ok local:b=ok' <<<"$out" && ! grep -q 
   && ok "several repos: union of manifests, every setup.local.sh" || no "several repos: $out"
 out="$(cd "$F/r2" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_ROOTS="$F/none/*" bash "$F/setup.sh" --repo "$F/r2/b" --repo "$F/r2/a")"
 grep -q 'core=ok good=ok zlate=ok local:b=ok local:a=ok' <<<"$out" && ok "--repo is repeatable" || no "--repo twice: $out"
+# A stale stub (it records nothing) in the first repo: the hand-off tries the next repo's stub.
+HL="$t/layer2"; mkdir -p "$HL"; printf 'exit 0\n' > "$HL/install-time.sh"
+printf 'echo "stale $*" >> "%s/calls2"\n' "$t" > "$F/r2/a/scripts/cloud/env-setup.sh"
+printf 'echo "fresh $*" >> "%s/calls2"; echo "clone %s" > "$HOME/.cloud-env.source"\n' "$t" "$HL" > "$F/r2/b/scripts/cloud/env-setup.sh"
+rm -f "$t/calls2" "$F/home/.cloud-env.source"
+out="$(cd "$F/r2" && env -u CLOUD_SETUP_HOME HOME="$F/home" CLOUD_SETUP_ROOTS="$F/r2/*" OP_CONNECT_HOST=https://op.test OP_CONNECT_TOKEN=t bash "$F/setup.sh")"
+[ "$(paste -sd'|' "$t/calls2")" = "stale --fetch-only|fresh --fetch-only" ] && grep -q 'session-layer=ok' <<<"$out" \
+  && ! grep -q ERROR "$F/home/.local/share/cloud-env/setup-result" && ok "hand-off: a stale stub falls through to the next repo's" || no "hand-off stale stub: $out / $(cat "$t/calls2")"
+rm -f "$F/r2/a/scripts/cloud/env-setup.sh" "$F/r2/b/scripts/cloud/env-setup.sh" "$F/home/.cloud-env.source"; rm -rf "$HL"
 mkdir -p "$F/r2/a/n" "$F/r2/b/n"; printf 'node\n' >> "$F/r2/b/scripts/cloud/manifest"
 [ "$(REPO="$F/r2/a" REPOS="$F/r2/a
 $F/r2/b" bash -c ". '$here/lib/common.sh'; repos_wanting node")" = "$F/r2/b" ] && ok "per-repo modules act only on the repos that list them" || no "repos_wanting"
