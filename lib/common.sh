@@ -23,6 +23,10 @@ repo_pins() {
 repo_pins
 
 export DEBIAN_FRONTEND=noninteractive
+# The platform, for a repo's own steps (scripts/cloud/setup.local.sh reads CLOUD_VENUE and skips
+# what belongs to another venue). Set only when unset and Codex's markers are present: Codex Cloud
+# runs the install line with none of a repo's venue wiring. Claude Code leaves it unset, as before.
+[ -n "${CLOUD_VENUE:-}" ] || { [ -n "${CODEX_ENVIRONMENT_ID:-}${CODEX_CI:-}" ] && export CLOUD_VENUE=codex; }
 
 # Where things install. Root: /usr/local/bin and /opt. A plain user: ~/.local. Only when HOME is
 # NOT writable (Codex Cloud's setup: only /workspace and /tmp are writable, and only /workspace
