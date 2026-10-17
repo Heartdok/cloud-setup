@@ -321,4 +321,129 @@ else
     && ok "read-only HOME: hand-off passes the prefix, reads <prefix>/share/cloud-env/source" || no "read-only hand-off: $out / $(cat "$t/calls" 2>/dev/null)"
 fi
 
+# The rust module: our own rustup (never the image's), standard dirs on a writable HOME, <prefix>/opt
+# on a read-only one, wrappers in $BIN that pin RUSTUP_HOME/CARGO_HOME, the repo's toolchain pin.
+# A fake curl serves a fake rustup-init (which lays down a fake rustup and proxies); no network.
+RS="$t/rs"; RS_FIX="$RS/fix"; RS_LOG="$RS/calls.log"; export RS_FIX RS_LOG
+mkdir -p "$RS/fake" "$RS/sys" "$RS_FIX" "$RS/ws" "$RS/repo/scripts/cloud" "$RS/repo2/scripts/cloud"
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo 1000; exit 0; }; exec %s "$@"\n' "$realid" > "$RS/fake/id"
+cat > "$RS/fake/curl" <<'SH'
+#!/bin/sh
+echo "$*" >> "$RS_LOG.curl"
+[ -z "${RS_CURL_FAIL:-}" ] || exit 22
+case "$*" in *https://sh.rustup.rs*) cat "$RS_FIX/installer" ;; *) exit 22 ;; esac
+SH
+cat > "$RS_FIX/installer" <<'SH'
+echo "init $* | HOME=$HOME RUSTUP_HOME=$RUSTUP_HOME CARGO_HOME=$CARGO_HOME SKIP=$RUSTUP_INIT_SKIP_PATH_CHECK" >> "$RS_LOG"
+mkdir -p "$CARGO_HOME/bin" "$RUSTUP_HOME"
+echo stable > "$RUSTUP_HOME/default"
+cp "$RS_FIX/rustup" "$CARGO_HOME/bin/rustup"
+for n in cargo rustc rustfmt cargo-clippy clippy-driver rustdoc; do cp "$RS_FIX/proxy" "$CARGO_HOME/bin/$n"; done
+SH
+cat > "$RS_FIX/pin" <<'SH'
+# prints the channel a rust-toolchain[.toml] in $PWD pins (nothing without one)
+for f in rust-toolchain.toml rust-toolchain; do
+  [ -f "$PWD/$f" ] || continue
+  v="$(sed -n 's/.*channel *= *"\([^"]*\)".*/\1/p' "$PWD/$f")"; [ -n "$v" ] || v="$(head -1 "$PWD/$f")"
+  echo "$v"; break
+done
+SH
+cat > "$RS_FIX/rustup" <<'SH'
+#!/bin/sh
+echo "rustup $* | pwd=$PWD RUSTUP_HOME=$RUSTUP_HOME CARGO_HOME=$CARGO_HOME" >> "$RS_LOG"
+install_pin() { v="$(sh "$RS_FIX/pin")"; [ -n "$v" ] && echo "$v" >> "$RUSTUP_HOME/installed"; return 0; }
+case "$1 $2" in
+  "--version ") echo "rustup 1.99.0 (ours) RUSTUP_HOME=$RUSTUP_HOME CARGO_HOME=$CARGO_HOME" ;;
+  "show active-toolchain") [ -f "$RUSTUP_HOME/default" ] ;;
+  "default stable") echo stable > "$RUSTUP_HOME/default" ;;
+  "toolchain install") [ -z "${RS_OLD_RUSTUP:-}" ] || exit 2; install_pin ;;
+  "show ") install_pin ;;
+esac
+exit 0
+SH
+cat > "$RS_FIX/proxy" <<'SH'
+#!/bin/sh
+case "$(basename "$0")" in
+  rustc) v="$(sh "$RS_FIX/pin")"
+         if [ -n "$v" ]; then grep -qx "$v" "$RUSTUP_HOME/installed" 2>/dev/null || { echo "toolchain '$v' is not installed" >&2; exit 1; }
+         else [ -f "$RUSTUP_HOME/default" ] || exit 1; v=1.97.1; fi
+         echo "rustc $v (fixture)" ;;
+  *) echo "$(basename "$0") RUSTUP_HOME=$RUSTUP_HOME CARGO_HOME=$CARGO_HOME $*" ;;
+esac
+SH
+printf '#!/bin/sh\necho SYSTEM-RUSTUP >> "$RS_LOG"; echo "rustup 1.20.0 (system)"\n' > "$RS/sys/rustup"; chmod +x "$RS/fake/"* "$RS/sys/rustup" "$RS_FIX/rustup" "$RS_FIX/proxy"
+printf 'rust\n' > "$RS/repo/scripts/cloud/manifest"; printf 'node\n' > "$RS/repo2/scripts/cloud/manifest"
+# rsmod <phase> <home> [VAR=val...]: run modules/rust.sh's phase as a session would (REPO from $RS_REPO).
+rsmod() {
+  local phase="$1" h="$2"; shift 2
+  env HOME="$h" PATH="$RS/fake:$RS/sys:$PATH" REPO="${RS_REPO:-}" REPOS="${RS_REPOS:-${RS_REPO:-}}" CLOUD_SETUP_WORKSPACE="$RS/ws" \
+    CLOUD_SETUP_PREFIX= "$@" bash -c ". '$here/lib/common.sh'; run_module $phase rust"
+}
+wrap() { printf '#!/bin/sh\n# cloud-setup rust: run the real %s from our own rustup\nexport RUSTUP_HOME=%s CARGO_HOME=%s\nexec %s/bin/%s "$@"\n' "$1" "$2" "$3" "$3" "$1"; }
+
+[ -n "$(lib 'module_description rust')" ] && lib 'known_modules' | grep -qx rust \
+  && ok "rust: registered, with a --list description" || no "rust module registry"
+# Writable HOME, no repo pin: ~/.rustup, ~/.cargo; stable minimal; wrappers in ~/.local/bin; the image's rustup ignored.
+H1="$RS/h1"; mkdir -p "$H1"; : > "$RS_LOG"; : > "$RS_LOG.curl"
+RS_REPO="$RS/repo" rsmod setup "$H1" RUSTUP_HOME=/image/rustup CARGO_HOME=/image/cargo; rc=$?
+[ $rc = 0 ] && [ -x "$H1/.cargo/bin/rustup" ] \
+  && grep -qxF "init -y --no-modify-path --profile minimal | HOME=$H1 RUSTUP_HOME=$H1/.rustup CARGO_HOME=$H1/.cargo SKIP=yes" "$RS_LOG" \
+  && grep -qxF -- "--proto =https --tlsv1.2 -sSf https://sh.rustup.rs" "$RS_LOG.curl" \
+  && ok "rust: rustup installed in ~/.cargo + ~/.rustup (minimal, no rc edits), whatever the image exports" || no "rust writable HOME: rc=$rc $(cat "$RS_LOG")"
+! grep -q 'toolchain install' "$RS_LOG" && ! grep -q SYSTEM-RUSTUP "$RS_LOG" && ok "rust: no pin → stable only; the system rustup is never run" || no "rust no-pin: $(cat "$RS_LOG")"
+miss=""; for n in cargo rustc rustup rustfmt cargo-clippy clippy-driver rustdoc; do [ -x "$H1/.local/bin/$n" ] || miss="$miss $n"; done
+[ -z "$miss" ] && [ "$(cat "$H1/.local/bin/rustup")" = "$(wrap rustup "$H1/.rustup" "$H1/.cargo")" ] \
+  && ok "rust: wrappers for cargo rustc rustup rustfmt cargo-clippy clippy-driver rustdoc in \$BIN" || no "rust wrappers:$miss"
+[ "$(env RUSTUP_HOME=/image/rustup CARGO_HOME=/image/cargo "$H1/.local/bin/cargo" build)" = "cargo RUSTUP_HOME=$H1/.rustup CARGO_HOME=$H1/.cargo build" ] \
+  && ok "rust: a wrapper overrides the image's RUSTUP_HOME/CARGO_HOME and passes arguments" || no "rust wrapper env"
+# A system rustup first on PATH is not reused: ours is installed, and $BIN's wrapper is what `rustup` resolves to.
+[ "$(env PATH="$H1/.local/bin:$RS/sys:$PATH" bash -c 'command -v rustup')" = "$H1/.local/bin/rustup" ] && [ "$(PATH="$H1/.local/bin:$RS/sys:$PATH" rustup --version)" = "rustup 1.99.0 (ours) RUSTUP_HOME=$H1/.rustup CARGO_HOME=$H1/.cargo" ] \
+  && ok "rust: an existing system rustup is not reused (ours wins on PATH)" || no "rust system rustup shadowing"
+[ "$(RS_REPO="$RS/repo" rsmod status "$H1")" = "rust=1.97.1" ] && ok "rust: status → rust=1.97.1" || no "rust status: $(RS_REPO="$RS/repo" rsmod status "$H1")"
+# Idempotent: a rerun downloads nothing, re-runs no installer.
+n="$(wc -l < "$RS_LOG.curl")"; RS_REPO="$RS/repo" rsmod setup "$H1"; rc=$?
+[ $rc = 0 ] && [ "$(wc -l < "$RS_LOG.curl")" = "$n" ] && [ "$(grep -c '^init ' "$RS_LOG")" = 1 ] && ok "rust: rerun is a no-op (no download, no second install)" || no "rust rerun: rc=$rc"
+# Pins: rust-toolchain.toml → `rustup toolchain install` in that repo; the pinned channel is what runs there.
+printf '[toolchain]\nchannel = "1.95.0"\ncomponents = ["clippy"]\n' > "$RS/repo/rust-toolchain.toml"
+: > "$RS_LOG"; RS_REPO="$RS/repo" rsmod setup "$H1"; rc=$?
+[ $rc = 0 ] && grep -qF "rustup toolchain install | pwd=$RS/repo " "$RS_LOG" && [ "$(RS_REPO="$RS/repo" rsmod status "$H1")" = "rust=1.95.0" ] \
+  && ok "rust: rust-toolchain.toml honored (installed from the repo dir; status shows the pin)" || no "rust pin: rc=$rc $(cat "$RS_LOG")"
+rm "$RS/repo/rust-toolchain.toml"; echo 1.94.0 > "$RS/repo/rust-toolchain"; rm -f "$H1/.rustup/installed"; : > "$RS_LOG"
+RS_REPO="$RS/repo" rsmod setup "$H1"; rc=$?
+[ $rc = 0 ] && [ "$(RS_REPO="$RS/repo" rsmod status "$H1")" = "rust=1.94.0" ] && ok "rust: legacy rust-toolchain file honored" || no "rust legacy pin: rc=$rc"
+rm -f "$H1/.rustup/installed"; : > "$RS_LOG"; RS_REPO="$RS/repo" rsmod setup "$H1" RS_OLD_RUSTUP=1; rc=$?
+[ $rc = 0 ] && grep -qF "rustup show | pwd=$RS/repo " "$RS_LOG" && [ "$(RS_REPO="$RS/repo" rsmod status "$H1")" = "rust=1.94.0" ] \
+  && ok "rust: an older rustup (no 'toolchain install' without arguments) falls back to 'rustup show'" || no "rust old rustup: rc=$rc $(cat "$RS_LOG")"
+# Several repos: only the ones whose manifest lists rust are acted on.
+printf '[toolchain]\nchannel = "1.80.0"\n' > "$RS/repo2/rust-toolchain.toml"; rm -f "$H1/.rustup/installed"; : > "$RS_LOG"
+RS_REPO="$RS/repo" RS_REPOS="$RS/repo
+$RS/repo2" rsmod setup "$H1"
+grep -qF "pwd=$RS/repo " "$RS_LOG" && ! grep -qF "pwd=$RS/repo2" "$RS_LOG" && ok "rust: several repos: only those whose manifest names rust" || no "rust several repos: $(cat "$RS_LOG")"
+rm -f "$RS/repo/rust-toolchain" "$RS/repo2/rust-toolchain.toml"
+# Failure is a failed step (non-zero, named), never a crash; status says missing. Through setup.sh: exit 0.
+H2="$RS/h2"; mkdir -p "$H2"; err="$(RS_REPO="$RS/repo" rsmod setup "$H2" RS_CURL_FAIL=1 2>&1)"; rc=$?
+[ $rc != 0 ] && grep -q 'rust: rustup install failed' <<<"$err" && [ ! -e "$H2/.local/bin/cargo" ] && [ "$(RS_REPO="$RS/repo" rsmod status "$H2")" = "rust=missing" ] \
+  && ok "rust: download fails → non-zero, named, no wrappers; status → rust=missing" || no "rust failure: rc=$rc $err"
+cp "$here/modules/rust.sh" "$F/modules/rust.sh"; printf 'rust\n' > "$F/repo/scripts/cloud/manifest"; mkdir -p "$F/rh"
+out="$(cd "$F/repo" && env -u CLOUD_SETUP_HOME HOME="$F/rh" PATH="$RS/fake:$PATH" RS_CURL_FAIL=1 CLOUD_SETUP_ROOTS="$F/none/*" bash "$F/setup.sh")"; rc=$?
+[ $rc = 0 ] && grep -q 'rust=failed(1)' <<<"$out" && ok "rust: through setup.sh a failed install still exits 0" || no "rust via setup.sh: rc=$rc $out"
+rm "$F/modules/rust.sh"
+# Read-only HOME (Codex Cloud): the existing prefix's opt/ holds rustup + cargo, wrappers go in its bin/, HOME stays untouched.
+RH="$RS/rohome"; mkdir -p "$RH"; chmod 555 "$RH"
+if [ -w "$RH" ]; then
+  echo "  - rust read-only HOME tests skipped (running as root: chmod 555 does not stop writes)"
+else
+  P="$RS/ws/.cloud"; : > "$RS_LOG"
+  RS_REPO="$RS/repo" rsmod setup "$RH" RUSTUP_HOME=/image/rustup CARGO_HOME=/image/cargo; rc=$?
+  [ $rc = 0 ] && [ -x "$P/opt/cargo/bin/rustup" ] && [ -z "$(ls -A "$RH")" ] \
+    && grep -qxF "init -y --no-modify-path --profile minimal | HOME=$P/home RUSTUP_HOME=$P/opt/rustup CARGO_HOME=$P/opt/cargo SKIP=yes" "$RS_LOG" \
+    && ok "rust: read-only HOME → <prefix>/opt/{rustup,cargo}, installer gets <prefix>/home, nothing under HOME" || no "rust read-only: rc=$rc $(cat "$RS_LOG"; ls -A "$RH")"
+  miss=""; for n in cargo rustc rustup rustfmt cargo-clippy clippy-driver rustdoc; do [ -x "$P/bin/$n" ] || miss="$miss $n"; done
+  [ -z "$miss" ] && [ "$(cat "$P/bin/cargo")" = "$(wrap cargo "$P/opt/rustup" "$P/opt/cargo")" ] \
+    && ok "rust: read-only HOME: the seven wrappers are in <prefix>/bin" || no "rust read-only wrappers:$miss"
+  [ "$(env -i RS_FIX="$RS_FIX" RS_LOG="$RS_LOG" PATH="$P/bin:/usr/bin:/bin" "$NR/tools/bash" -c 'cargo test; rustc -V' 2>&1)" = "cargo RUSTUP_HOME=$P/opt/rustup CARGO_HOME=$P/opt/cargo test"$'\n'"rustc 1.97.1 (fixture)" ] \
+    && ok "rust: read-only HOME: an agent that only has <prefix>/bin on PATH gets the right RUSTUP_HOME/CARGO_HOME" || no "rust read-only agent PATH: $(env -i RS_FIX="$RS_FIX" RS_LOG="$RS_LOG" PATH="$P/bin:/usr/bin:/bin" "$NR/tools/bash" -c "cargo test; rustc -V" 2>&1)"
+  [ "$(RS_REPO="$RS/repo" rsmod status "$RH")" = "rust=1.97.1" ] && ok "rust: read-only HOME: status → rust=1.97.1" || no "rust read-only status"
+fi
+
 exit $fail
