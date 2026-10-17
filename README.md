@@ -55,7 +55,7 @@ children (multi-repo sandboxes such as Codex Cloud clone side by side under an u
 then each directory matching `/workspace/*`, `/agent/repos/*` (Cursor Cloud), `/home/*/*` and `/root/*` (override with
 `CLOUD_SETUP_ROOTS`). A sandbox that clones several repos side by side gets the union of their
 manifests, and each repo's `setup.local.sh` runs (steps `local:<repo>`); per-repo modules (`node`,
-`python`) act on the repos that list them, and the first repo that pins Bun sets its version.
+`python`, `rust`) act on the repos that list them, and the first repo that pins Bun sets its version.
 Without a manifest anywhere, the first git repository found, else the current directory, gets `core`
 only. `--repo DIR` (repeatable, or `CLOUD_SETUP_REPO`) skips the search.
 
@@ -88,6 +88,7 @@ same budget). A project's Bun version (`.bun-version`, or `"packageManager": "bu
 | `python` | the project's Python and locked deps (`uv sync --frozen`) |
 | `node` | the project's JS deps (`bun install --frozen-lockfile`) |
 | `wrangler` | Cloudflare's CLI |
+| `rust` | a user-space Rust toolchain from our own rustup (never the image's): each repo's `rust-toolchain[.toml]` pin, else stable minimal. In `~/.cargo` + `~/.rustup`, or `<prefix>/opt/{cargo,rustup}` with a read-only HOME; wrappers for `cargo`, `rustc`, `rustup`, `rustfmt`, `cargo-clippy`, `clippy-driver`, `rustdoc` in the bin dir set `RUSTUP_HOME`/`CARGO_HOME`, so `<prefix>/bin` on `PATH` is enough |
 | `tailscale` | the Tailscale client, installed only |
 
 Nothing here signs in to anything or reads a secret: credentials don't exist yet when a setup script
