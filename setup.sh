@@ -8,7 +8,16 @@
 #                                # repeatable. Without it: every cloned repo that has a manifest
 #                 [--no-local]   # skip the repo's scripts/cloud/setup.local.sh and the session-layer hand-off
 #                 [--fetch-only] # only download this repo to its home (below), install nothing
+#                 [--reconcile]  # a cached container's per-task step: reinstall only what is off its pin
 #                 [--list]       # known modules
+#
+#   curl -fsSL https://raw.githubusercontent.com/Heartdok/cloud-setup/main/setup.sh | bash -s -- --reconcile || true
+#
+# --reconcile is for a platform that reuses a cached container and runs a step before each task
+# (Codex Cloud's Maintenance script). It resolves every pin as an install does (lib/common.sh: the
+# repo's .bun-version, then package.json packageManager, then pins.env), asks each module's drift()
+# what is off its pin, reruns only those pieces (reconcile()), refreshes the ~/.local/bin mirror and
+# setup-result, and appends to setup.log. With nothing off its pin it writes nothing at all.
 #
 # Piped from curl, it first downloads itself (a tarball, anonymously) to CLOUD_SETUP_HOME
 # (/opt/cloud-setup as root, else ~/.local/share/cloud-setup) and runs that copy, so the modules
@@ -53,19 +62,24 @@ default_home() {
 
 # Download this repo to $1 (replacing it only on success) and record its commit in $1/.commit.
 # GitHub's tarballs carry the commit id in their pax header, so no git and no API call is needed.
+# The same commit already there is left as it is (nothing under $1 or its parent is written).
 fetch_self() {
-  local dest="$1" tmp sha rc
-  mkdir -p "$(dirname "$dest")" && tmp="$(mktemp -d "$(dirname "$dest")/.cloud-setup.XXXXXX")" || return 1
-  if curl -fsSL --retry 2 --max-time 60 -o "$tmp/src.tgz" \
-       "${CLOUD_SETUP_TARBALL:-https://codeload.github.com/$SLUG/tar.gz/$REF}" \
-     && mkdir "$tmp/src" && tar -xzf "$tmp/src.tgz" -C "$tmp/src" --strip-components=1 \
+  local dest="$1" dl tmp sha rc
+  dl="$(mktemp "${TMPDIR:-/tmp}/cloud-setup-src.XXXXXX")" || return 1
+  curl -fsSL --retry 2 --max-time 60 -o "$dl" "${CLOUD_SETUP_TARBALL:-https://codeload.github.com/$SLUG/tar.gz/$REF}" \
+    || { rm -f "$dl"; return 1; }
+  sha="$(gzip -dc "$dl" 2>/dev/null | head -c 1024 | grep -ao 'comment=[0-9a-f]\{40\}' | head -1 | cut -d= -f2)"
+  if [ -n "$sha" ] && [ "$sha" = "$(cat "$dest/.commit" 2>/dev/null)" ] && [ -f "$dest/setup.sh" ] && [ -f "$dest/lib/common.sh" ]; then
+    rm -f "$dl"; return 0
+  fi
+  mkdir -p "$(dirname "$dest")" && tmp="$(mktemp -d "$(dirname "$dest")/.cloud-setup.XXXXXX")" || { rm -f "$dl"; return 1; }
+  if mkdir "$tmp/src" && tar -xzf "$dl" -C "$tmp/src" --strip-components=1 \
      && [ -f "$tmp/src/setup.sh" ] && [ -f "$tmp/src/lib/common.sh" ]; then
-    sha="$(gzip -dc "$tmp/src.tgz" 2>/dev/null | head -c 1024 | grep -ao 'comment=[0-9a-f]\{40\}' | head -1 | cut -d= -f2)"
     echo "${sha:-unknown}" > "$tmp/src/.commit"
     rm -rf "$dest.old" && { [ ! -e "$dest" ] || mv "$dest" "$dest.old"; } && mv "$tmp/src" "$dest"
-    rc=$?; rm -rf "$tmp" "$dest.old"; return $rc
+    rc=$?; rm -rf "$tmp" "$dest.old" "$dl"; return $rc
   fi
-  rm -rf "$tmp"; return 1
+  rm -rf "$tmp" "$dl"; return 1
 }
 
 # Not running from a checkout (piped from curl, or a lone copy): fetch one, run it.
@@ -77,7 +91,7 @@ bootstrap() {
   fi
   local share p
   if p="$(ro_prefix)"; then share="${CLOUD_ENV_SHARE:-$p/share/cloud-env}"; else share="${CLOUD_ENV_SHARE:-$HOME/.local/share/cloud-env}"; fi
-  case " $* " in *" --fetch-only "*) ;; *)
+  case " $* " in *" --fetch-only "*|*" --reconcile "*) ;; *)   # a reconcile writes nothing it did not fix
     mkdir -p "$share" 2>/dev/null \
       && echo "ERROR=could not download $SLUG@$REF and no copy at $dest" > "${CLOUD_SETUP_RESULT:-$share/setup-result}" ;;
   esac
@@ -142,12 +156,58 @@ handoff() {
   return 0
 }
 
+# --reconcile: what each module's drift() names, reinstalled by its reconcile(). Every step is a
+# run_step with RESULT pointed away, so setup-result changes once, at the end, and only when its line
+# would. That line keeps the install's own errors (a reconcile fixes pins, not a failed step) minus
+# any earlier reconcile's, plus this one's. It is rewritten only over a finished install (base=…): a
+# missing or cut-off result stays for a session-time repair to see. The summary goes to setup.log as
+# "cloud-setup reconcile: …", which a reader of the install's "cloud-setup: …" line does not match.
+reconcile_main() {
+  local m p r prior line err=""
+  local -a todo=() errors=()
+  manifest="$(mktemp "${TMPDIR:-/tmp}/cloud-setup-manifest.XXXXXX")"
+  while IFS= read -r r; do cat "$r/scripts/cloud/manifest" 2>/dev/null >> "$manifest"; echo >> "$manifest"; done <<< "$REPOS"
+  for m in $(resolve_modules "$manifest"); do
+    p="$(run_module drift "$m" 2>/dev/null | paste -sd' ' -)"
+    [ -z "$p" ] || todo+=("$m:$p")
+  done
+  rm -f "$manifest"
+  prior="$(cat "$RESULT" 2>/dev/null)"
+  case "$prior" in *" ERROR="*)
+    while IFS= read -r line; do case "$line" in ""|"reconcile failed:"*) ;; *) errors+=("$line") ;; esac
+    done < <(printf '%s\n' "${prior#* ERROR=}" | sed 's/; /\n/g') ;;
+  esac
+  if [ ${#todo[@]} -gt 0 ]; then
+    { echo; echo "cloud-setup reconcile base=$base drift=${todo[*]} started $(date -u +%FT%TZ)"; } >> "$LOG" 2>/dev/null || LOG=/tmp/cloud-setup.log
+    export LOG
+    local real_result="$RESULT"; RESULT=/dev/null   # run_step's "running:" lines stay out of setup-result
+    APT_STAMP="$(mktemp -u "${TMPDIR:-/tmp}/cloud-setup-apt.XXXXXX")"; export APT_STAMP
+    for p in "${todo[@]}"; do
+      m="${p%%:*}"
+      # shellcheck disable=SC2016,SC2086 # expanded by the step's own shell; the pieces are a word list
+      run_step "$m" bash -c '. "$CLOUD_SETUP_HOME/lib/common.sh"; run_module reconcile "$@"' _ "$m" ${p#*:}
+    done
+    rm -f "$APT_STAMP"; RESULT="$real_result"
+    [ -n "$failed$skipped" ] && errors+=("reconcile failed:$failed$skipped")
+  fi
+  [ ${#errors[@]} -gt 0 ] && err="$(printf '%s; ' "${errors[@]}")" && err="${err%; }"
+  line="base=$base${err:+ ERROR=$err}"
+  case "$prior" in base=*) [ "$line" = "$prior" ] || echo "$line" > "$RESULT" ;; esac
+  if [ ${#todo[@]} -eq 0 ]; then
+    echo "cloud-setup reconcile: nothing off its pin base=$base secs=$(( $(date +%s) - t0 ))"
+  else
+    echo "cloud-setup reconcile: drift=${todo[*]}$summary secs=$(( $(date +%s) - t0 )) log=$LOG" | tee -a "$LOG"
+  fi
+  exit 0
+}
+
 main() {
-  local here="$1" repos="${CLOUD_SETUP_REPO:-}" local_step=1 m r; shift
+  local here="$1" repos="${CLOUD_SETUP_REPO:-}" local_step=1 reconcile=0 m r; shift
   while [ $# -gt 0 ]; do case "$1" in
     --repo) [ -z "${2:-}" ] || repos="${repos:+$repos
 }$2"; shift 2 ;;
     --no-local) local_step=0; shift ;;
+    --reconcile) reconcile=1; shift ;;
     --fetch-only) exit 0 ;;   # we are a checkout already
     --list) export CLOUD_SETUP_HOME="$here"
             # shellcheck source=lib/common.sh
@@ -171,10 +231,11 @@ main() {
   mkdir -p "$SHARE"
   RESULT="${CLOUD_SETUP_RESULT:-$SHARE/setup-result}"
   LOG="${CLOUD_SETUP_LOG:-$SHARE/setup.log}"
-  : 2>/dev/null >"$LOG" || LOG=/tmp/cloud-setup.log
-  export LOG
   base="$(head -c 7 "$here/.commit" 2>/dev/null)"
   case "$base" in ""|unknown) base="$(git -C "$here" rev-parse --short HEAD 2>/dev/null || echo local)" ;; esac
+  [ "$reconcile" = 1 ] && reconcile_main
+  : 2>/dev/null >"$LOG" || LOG=/tmp/cloud-setup.log
+  export LOG
   echo "cloud-setup base=$base repo=$(echo "$REPOS" | paste -sd' ' -) budget=${budget}s started $(date -u +%FT%TZ)" >> "$LOG"
   # Read-only HOME: say where everything went, at a fixed path inside the prefix (`. <prefix>/env`).
   [ "$RO_HOME" = 1 ] && printf '# cloud-setup: HOME is read-only, so tools live here. Use: . %s/env\nexport CLOUD_PREFIX=%q\nexport PATH="%s:$PATH"\n' \

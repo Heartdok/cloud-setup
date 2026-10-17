@@ -67,21 +67,32 @@ mkdir -p "$BIN" "$OPT" "$SHARE"
 # `export PATH=$HOME/.local/bin:$PATH`). So each command we install is also reachable there, as a
 # symlink to $BIN/<name> (a later replacement of that file is followed). A real file already there
 # is the owner's and stays; with BIN = ~/.local/bin (plain user) or a read-only HOME this is a no-op.
+_mirror_action() { # name → what mirror_bin would do for it: link, unlink, or nothing
+  local n="$1" m="$HOME/.local/bin"
+  if [ ! -e "$BIN/$n" ]; then   # missing, dangling or cyclic: nothing valid to mirror
+    # a mirror we made earlier that now points at that is repaired by removal, never linked back
+    [ -L "$m/$n" ] && [ "$(readlink "$m/$n")" = "$BIN/$n" ] && echo unlink
+    return 0
+  fi
+  [ "$BIN/$n" -ef "$m/$n" ] && return 0                     # already the same file (or a loop)
+  { [ -e "$m/$n" ] || [ -L "$m/$n" ]; } && [ ! -L "$m/$n" ] && return 0
+  echo link
+}
 mirror_bin() { # name...
   [ "$RO_HOME" = 0 ] && [ "$BIN" != "$HOME/.local/bin" ] || return 0
   local n m="$HOME/.local/bin"
   mkdir -p "$m" 2>/dev/null || return 0
   for n in "$@"; do
-    if [ ! -e "$BIN/$n" ]; then   # missing, dangling or cyclic: nothing valid to mirror
-      # a mirror we made earlier that now points at that is repaired by removal, never linked back
-      [ -L "$m/$n" ] && [ "$(readlink "$m/$n")" = "$BIN/$n" ] && rm -f "$m/$n"
-      continue
-    fi
-    [ "$BIN/$n" -ef "$m/$n" ] && continue                     # already the same file (or a loop)
-    { [ -e "$m/$n" ] || [ -L "$m/$n" ]; } && [ ! -L "$m/$n" ] && continue
-    ln -sfn "$BIN/$n" "$m/$n"
+    case "$(_mirror_action "$n")" in
+      link) ln -sfn "$BIN/$n" "$m/$n" ;;
+      unlink) rm -f "$m/$n" ;;
+    esac
   done
   return 0
+}
+mirror_stale() { # name... → those mirror_bin would change (for drift(); prints nothing when all are right)
+  [ "$RO_HOME" = 0 ] && [ "$BIN" != "$HOME/.local/bin" ] || return 0
+  local n; for n in "$@"; do [ -z "$(_mirror_action "$n")" ] || echo "$n"; done
 }
 link() { ln -sfn "$2" "$BIN/$1" && mirror_bin "$1"; } # name target
 # A third-party installer that writes to ~ (shell rc files, receipts, its own home): with a
@@ -180,8 +191,8 @@ resolve_modules() { # manifest → core, then requested modules with their requi
   done | awk '!seen[$0]++'
 }
 
-run_module() { # phase name: source modules/<name>.sh in a subshell, call <phase>() if defined
+run_module() { # phase name [arg...]: source modules/<name>.sh in a subshell, call <phase> [arg...] if defined
   ( # shellcheck disable=SC1090
     . "$CLOUD_SETUP_HOME/modules/$2.sh"
-    if declare -F "$1" >/dev/null; then "$1"; else exit 0; fi )
+    if declare -F "$1" >/dev/null; then "$1" "${@:3}"; else exit 0; fi )
 }
