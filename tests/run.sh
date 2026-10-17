@@ -278,6 +278,41 @@ nr "$here/setup.sh" --repo "$NR/repo" >/dev/null
 [ "$(jq '[.hooks.SessionStart[].hooks[].command | select(endswith("# cloud-setup"))] | length' "$NR/home/.claude/settings.json")" = 1 ] && [ -x "$NR/home/.local/bin/gh" ] \
   && ok "writable HOME, plain user: SessionStart hook in ~/.claude, tools in ~/.local/bin" || no "writable HOME hook/tools"
 
+# Root with a writable HOME (Codex Cloud's older universal image): BIN is /usr/local/bin, but the image's
+# own bun/gh sit ahead of it on PATH, and ~/.local/bin is what agents put first. Every link is mirrored
+# there. CLOUD_SETUP_BIN/OPT give the root layout without root.
+M="$t/mir"; mkdir -p "$M/home/.local/bin" "$M/usr-local-bin" "$M/opt" "$M/image" "$M/tgt"
+printf '#!/bin/sh\necho 1.2.14\n' > "$M/image/bun"; printf '#!/bin/sh\necho 1.4.2\n' > "$M/tgt/bun"; chmod +x "$M/image/bun" "$M/tgt/bun"
+echo mine > "$M/home/.local/bin/owned"; echo ours > "$M/tgt/owned"; echo ours > "$M/tgt/cursor-agent"; ln -s "$M/home/.local/bin/cursor-agent" "$M/usr-local-bin/cursor-agent"; echo theirs > "$M/home/.local/bin/cursor-agent"
+mir() { env HOME="$M/home" CLOUD_SETUP_BIN="$M/usr-local-bin" CLOUD_SETUP_OPT="$M/opt" bash -c ". '$here/lib/common.sh'; $1"; }
+mir "link bun '$M/tgt/bun'; link owned '$M/tgt/owned'; link cursor-agent '$M/home/.local/bin/cursor-agent'; link vault '$M/tgt/bun'"
+[ "$(PATH="$M/home/.local/bin:$M/image:$M/usr-local-bin:/usr/bin:/bin" bun --version)" = 1.4.2 ] \
+  && [ "$(PATH="$M/image:$M/usr-local-bin:/usr/bin:/bin" bun --version)" = 1.2.14 ] \
+  && [ "$(readlink "$M/home/.local/bin/bun")" = "$M/usr-local-bin/bun" ] && [ "$(readlink "$M/home/.local/bin/vault")" = "$M/usr-local-bin/vault" ] \
+  && ok "root layout: a linked command is also in ~/.local/bin (the pinned bun beats the image's when it is first), pointing through BIN" || no "mirror: $(ls -l "$M/home/.local/bin")"
+[ "$(cat "$M/home/.local/bin/owned")" = mine ] && [ ! -L "$M/home/.local/bin/owned" ] && [ "$(cat "$M/home/.local/bin/cursor-agent")" = theirs ] && [ ! -L "$M/home/.local/bin/cursor-agent" ] \
+  && ok "root layout: a real file in ~/.local/bin is the owner's and stays; a link back to it is not made a loop" || no "mirror clobbered: $(ls -l "$M/home/.local/bin")"
+mir "link bun '$M/tgt/owned'; mirror_bin bun"; [ "$(readlink "$M/usr-local-bin/bun")" = "$M/tgt/owned" ] && [ "$(readlink "$M/home/.local/bin/bun")" = "$M/usr-local-bin/bun" ] \
+  && ok "root layout: re-linking a command re-points BIN's file and the mirror still follows it" || no "mirror relink"
+rm -rf "$M/home2"; mkdir -p "$M/home2"
+env HOME="$M/home2" CLOUD_SETUP_BIN="$M/home2/.local/bin" bash -c ". '$here/lib/common.sh'; link bun '$M/tgt/bun'; RO_HOME=1 BIN='$M/usr-local-bin' mirror_bin bun"
+[ -L "$M/home2/.local/bin/bun" ] && [ "$(readlink "$M/home2/.local/bin/bun")" = "$M/tgt/bun" ] && ok "plain user (BIN is ~/.local/bin) and a read-only HOME: no mirror, nothing extra" || no "mirror when BIN is ~/.local/bin: $(ls -l "$M/home2/.local/bin")"
+# A BIN link to a ~/.local/bin file that is missing must not get the reverse link (a 2-link cycle that reruns kept);
+# a cycle already there is repaired. link() keeps ln's failure.
+rm -rf "$M/home3"; mkdir -p "$M/home3/.local/bin" "$M/ub3"
+ln -s "$M/home3/.local/bin/dang" "$M/ub3/dang"
+env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; mirror_bin dang; mirror_bin dang"
+[ ! -e "$M/home3/.local/bin/dang" ] && [ ! -L "$M/home3/.local/bin/dang" ] && ok "mirror_bin: a BIN link to a missing ~/.local/bin file is not mirrored back (no cycle)" || no "mirror cycle: $(ls -l "$M/home3/.local/bin")"
+ln -s "$M/ub3/dang" "$M/home3/.local/bin/dang"   # a cycle from an earlier version
+env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; mirror_bin dang"
+[ ! -L "$M/home3/.local/bin/dang" ] && ok "mirror_bin: an existing 2-link cycle is repaired" || no "cycle kept"
+env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; chmod 555 '$M/ub3'; link x '$M/tgt/bun'"; rc=$?; chmod 755 "$M/ub3"
+if [ -w "$M/ub3" ] && [ "$(id -u)" != 0 ]; then [ $rc != 0 ] && [ ! -e "$M/home3/.local/bin/x" ] && ok "link: a failed ln is reported, not masked by mirror_bin" || no "link masked ln failure rc=$rc"; fi
+
+# core's own shims and the uv/rust steps mirror too: an image npm/npx must not outrank them.
+mir ". '$here/modules/core.sh'; core_no_npm" 2>/dev/null   # BSD install cannot read a pipe for npx: only Linux gets both
+[ -L "$M/home/.local/bin/npm" ] && { [ ! -e "$M/usr-local-bin/npx" ] || [ -L "$M/home/.local/bin/npx" ]; } && ok "root layout: the npm/npx shims are mirrored" || no "npm shims not mirrored"
+
 # A read-only HOME (Codex Cloud's setup: only /workspace and /tmp are writable): everything goes to
 # <workspace>/.cloud, nothing under HOME, and the summary names the prefix.
 RO="$t/ro"; mkdir -p "$RO/home" "$RO/ws" "$RO/repo/scripts/cloud"; : > "$RO/repo/scripts/cloud/manifest"; chmod 555 "$RO/home"

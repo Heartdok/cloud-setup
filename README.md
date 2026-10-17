@@ -28,7 +28,14 @@ and `env`, which records the prefix: `. /workspace/.cloud/env` puts its `bin` on
 that write to `~` (Bun's, uv's, Grok's, Cursor's) get `<prefix>/home` as their HOME; core skips the
 user-level SessionStart hook with a note; the summary line ends with `prefix=<dir>`. This applies
 only when `$HOME` exists and is not writable: with a writable HOME (Claude Code as root, Cursor as
-a user) every path, file, hook and output line is what it was before, and the tests check that.
+a user) every path, hook and output line is what it was before, and the tests check that.
+
+**Root with a writable HOME** (Claude Code; Codex Cloud's older universal image, user `root`): tools
+go to `/usr/local/bin`, but an image can put its own Bun or `gh` on a PATH ahead of it, while
+`~/.local/bin` is the directory an agent puts first (`export PATH=$HOME/.local/bin:$PATH`). So every
+command core links or wraps is also a symlink in `~/.local/bin` pointing at the `/usr/local/bin`
+file (`mirror_bin` in `lib/common.sh`); a real file already there is left alone. A plain user's
+`BIN` already is `~/.local/bin`, and with a read-only HOME nothing changes.
 
 From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]` (`--no-local` also skips the
 session-layer hand-off below).
