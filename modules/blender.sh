@@ -9,6 +9,9 @@ setup() {
   blender_install
 }
 
+drift() { blender_have || echo blender; }   # reconcile: the pinned release
+reconcile() { blender_install; }
+
 status() { blender_have && echo "blender=$BLENDER_PIN" || echo "blender=missing"; }
 
 blender_dest() { echo "$OPT/blender-${BLENDER_PIN}"; }

@@ -12,6 +12,10 @@ setup() {
   launcher
 }
 
+# Reconcile: uv's receipt for the tool records the git rev it was installed from.
+drift() { grep -qF "rev=$BLENDER_MCP_REF" "$(uv tool dir 2>/dev/null)/blender-mcp/uv-receipt.toml" 2>/dev/null || echo blender-mcp; }
+reconcile() { setup; }
+
 status() { command -v blender-mcp >/dev/null && echo "blender-mcp=ok" || echo "blender-mcp=missing"; }
 
 # .mcp.json: {"mcpServers":{"blender":{"command":"cloud-env-blender-mcp"}}} — stdout is the MCP

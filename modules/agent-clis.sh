@@ -12,6 +12,10 @@ setup() {
   return $rc
 }
 
+# Reconcile: Codex is the one pinned CLI (the others track their vendors' latest).
+drift() { _codex_ok || echo codex; [ -z "$(mirror_stale codex grok cursor-agent gemini)" ] || echo mirror; }
+reconcile() { local rc=0; case " $* " in *" codex "*) agent_codex || rc=1 ;; esac; mirror_bin codex grok cursor-agent gemini; return $rc; }
+
 status() { echo "codex=$(_agent_v codex) grok=$(_agent_v grok) cursor=$(_agent_v cursor-agent) gemini=$(_agent_v gemini)"; }
 _agent_v() { command -v "$1" >/dev/null || { echo missing; return; }; local x; x="$(ver "$1" --version)"; echo "${x:-ok}"; }
 
@@ -19,16 +23,16 @@ _agent_v() { command -v "$1" >/dev/null || { echo missing; return; }; local x; x
 _agent_cap() { if command -v timeout >/dev/null; then timeout "${AGENT_CLIS_TIMEOUT:-240}" "$@"; else "$@"; fi; }
 
 _codex_real() { find "$1/node_modules/@openai" -path '*/vendor/*/bin/codex' -type f 2>/dev/null | head -1; }
+_codex_ok() { local real; real="$(_codex_real "$SHARE/codex")" && [ -n "$real" ] && [ "$("$real" --version 2>/dev/null)" = "codex-cli $CODEX_PIN" ]; }
 agent_codex() {
   local dir="$SHARE/codex" real
-  real="$(_codex_real "$dir")"
-  if [ -z "$real" ] || [ "$("$real" --version 2>/dev/null)" != "codex-cli $CODEX_PIN" ]; then
+  if ! _codex_ok; then
     command -v bun >/dev/null 2>&1 || return 1
     rm -rf "$dir" && mkdir -p "$dir" && printf '{"private":true}\n' > "$dir/package.json"
     (cd "$dir" && _agent_cap bun add "@openai/codex@$CODEX_PIN" >/dev/null 2>&1) || return 1
-    real="$(_codex_real "$dir")"
-    [ -n "$real" ] || return 1
   fi
+  real="$(_codex_real "$dir")"
+  [ -n "$real" ] || return 1
   link codex "$real"
 }
 

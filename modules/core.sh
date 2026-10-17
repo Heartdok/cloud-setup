@@ -71,7 +71,7 @@ core_tarball() { # url sums-url dir binary-in-dir name
 }
 
 core_jq() {
-  core_have jq "$JQ_PIN" && return 0
+  core_ok_jq && return 0
   local arch tmp rc base="https://github.com/jqlang/jq/releases/download/jq-${JQ_PIN}"
   arch="$(core_arch)" || return 1; tmp="$(mktemp -d)"
   core_fetch "$base/jq-linux-$arch" "$base/sha256sum.txt" "$tmp/jq" && install -m 755 "$tmp/jq" "$BIN/jq"
@@ -79,7 +79,7 @@ core_jq() {
 }
 
 core_gh() {
-  core_have gh "$GH_PIN" && return 0
+  core_ok_gh && return 0
   local arch base="https://github.com/cli/cli/releases/download/v${GH_PIN}"
   arch="$(core_arch)" || return 1
   core_tarball "$base/gh_${GH_PIN}_linux_$arch.tar.gz" "$base/gh_${GH_PIN}_checksums.txt" \
@@ -87,11 +87,35 @@ core_gh() {
 }
 
 core_git_lfs() { # sha256sums.asc is clearsigned; its hash lines are read, the signature is not checked
-  core_have git-lfs "$GIT_LFS_PIN" && return 0
+  core_ok_git_lfs && return 0
   local arch base="https://github.com/git-lfs/git-lfs/releases/download/v${GIT_LFS_PIN}"
   arch="$(core_arch)" || return 1
   core_tarball "$base/git-lfs-linux-$arch-v${GIT_LFS_PIN}.tar.gz" "$base/sha256sums.asc" \
     "git-lfs-${GIT_LFS_PIN}" git-lfs git-lfs && [ "$(ver git-lfs --version)" = "$GIT_LFS_PIN" ]
+}
+
+# Reconcile (setup.sh --reconcile, a cached container's per-task step): each pinned piece's check is
+# the one its installer starts with, so the two cannot disagree. jq, gh and git-lfs are pinned only
+# without root (as root they are apt's); node is not pinned (an image's own >= 20 is kept).
+core_ok_uv() { [ "$(ver uv --version)" = "$UV_PIN" ]; }
+core_ok_bun() { [ "$(bun --version 2>/dev/null)" = "$BUN_PIN" ]; }
+core_ok_pandoc() { [ "$(ver pandoc --version)" = "$PANDOC_PIN" ]; }
+core_ok_op() { [ "$(op --version 2>/dev/null)" = "$OP_CLI_PIN" ]; }
+core_ok_jq() { core_have jq "$JQ_PIN"; }
+core_ok_gh() { core_have gh "$GH_PIN"; }
+core_ok_git_lfs() { core_have git-lfs "$GIT_LFS_PIN"; }
+core_pinned() { echo uv bun pandoc op; can_root || echo jq gh git_lfs; }
+CORE_MIRRORED="uv uvx bun bunx npm npx node op gh jq git-lfs pandoc"
+drift() { # → the pieces that are not at their pin, one per line; nothing when all are
+  local p
+  for p in $(core_pinned); do "core_ok_$p" || echo "$p"; done
+  [ -z "$(mirror_stale $CORE_MIRRORED)" ] || echo mirror   # word list
+}
+reconcile() { # piece...: reinstall those, then refresh the ~/.local/bin mirror
+  local p rc=0
+  for p in "$@"; do [ "$p" = mirror ] || "core_$p" || rc=1; done
+  mirror_bin $CORE_MIRRORED   # word list
+  return $rc
 }
 
 status() { echo "node=$(ver node --version) uv=$(ver uv --version) bun=$(ver bun --version) pandoc=$(ver pandoc --version) op=$(ver op --version) gh=$(ver gh --version)"; }
@@ -117,9 +141,9 @@ core_session_hook() {
 }
 
 core_uv() {
-  [ "$(ver uv --version)" = "$UV_PIN" ] && { mirror_bin uv uvx; return 0; }
+  core_ok_uv && { mirror_bin uv uvx; return 0; }
   curl -LsSf "https://astral.sh/uv/${UV_PIN}/install.sh" | in_ihome env UV_INSTALL_DIR="$BIN" UV_NO_MODIFY_PATH=1 sh
-  hash -r; mirror_bin uv uvx; [ "$(ver uv --version)" = "$UV_PIN" ]
+  hash -r; mirror_bin uv uvx; core_ok_uv
 }
 
 core_node() { # keep an image's own Node >= 20; otherwise the pinned LTS tarball
@@ -147,14 +171,14 @@ SH
 }
 
 core_bun() {
-  [ "$(bun --version 2>/dev/null)" = "$BUN_PIN" ] && { mirror_bin bun bunx; return 0; }
+  core_ok_bun && { mirror_bin bun bunx; return 0; }
   curl -fsSL https://bun.sh/install | in_ihome env BUN_INSTALL="$OPT/bun" bash -s -- "bun-v${BUN_PIN}" \
     && link bun "$OPT/bun/bin/bun" && link bunx "$OPT/bun/bin/bun"
-  hash -r; [ "$(bun --version)" = "$BUN_PIN" ]
+  hash -r; core_ok_bun
 }
 
 core_pandoc() {
-  [ "$(ver pandoc --version)" = "$PANDOC_PIN" ] && return 0
+  core_ok_pandoc && return 0
   local arch deb
   arch="$(core_arch)" || return 1
   if ! can_root; then # the same release's static tarball (it publishes no checksum list)
@@ -169,7 +193,7 @@ core_pandoc() {
 
 # 1Password's signed zip, verified against its release key when the key can be fetched.
 core_op() {
-  [ "$(op --version 2>/dev/null)" = "$OP_CLI_PIN" ] && return 0
+  core_ok_op && return 0
   local key=3FEF9748469ADBE15DA7CA80AC2D62742012EA22 arch tmp
   arch="$(core_arch)" || return 1
   tmp="$(mktemp -d)"
@@ -182,5 +206,5 @@ core_op() {
     echo "core: REFUSING op — signature does not verify" >&2; rm -rf "$tmp"; return 1
   fi
   install -m 755 "$tmp/op" "$SHARE/op" && link op "$SHARE/op"; rm -rf "$tmp"; unset GNUPGHOME
-  [ "$(op --version)" = "$OP_CLI_PIN" ]
+  core_ok_op
 }

@@ -37,8 +37,40 @@ command core links or wraps is also a symlink in `~/.local/bin` pointing at the 
 file (`mirror_bin` in `lib/common.sh`); a real file already there is left alone. A plain user's
 `BIN` already is `~/.local/bin`, and with a read-only HOME nothing changes.
 
-From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--list]` (`--no-local` also skips the
-session-layer hand-off below).
+From a checkout: `bash setup.sh [--repo DIR] [--no-local] [--reconcile] [--list]` (`--no-local` also
+skips the session-layer hand-off below; `--reconcile` is the next section).
+
+## Cached containers: `--reconcile`
+A platform that caches the container after setup keeps the tool versions it had then: a pin bumped
+here, or a repo's `.bun-version` changed on a branch, does not apply until the cache is rebuilt. Where
+the platform runs a step before each task on the cached container, put this line there:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Heartdok/cloud-setup/main/setup.sh | bash -s -- --reconcile || true
+```
+
+It fetches this repo (the copy on disk is left untouched when the commit is the same), resolves every
+pin as an install does (the repo's `.bun-version`, then `package.json` `packageManager`, then
+`pins.env`), and asks each module in the manifests what is off its pin. Only those pieces are
+reinstalled; then the `~/.local/bin` mirror is refreshed, `setup-result` is rewritten (the install's
+own errors kept, a failed reinstall added as `reconcile failed: <module>`), and the run is appended
+to `setup.log` as `cloud-setup reconcile: …`. **With nothing off its pin it takes about a second and
+writes nothing.** It exits 0 always, and leaves a missing or cut-off `setup-result` alone for a
+session-time repair.
+
+Reconciled: `core` (uv, Bun, pandoc, `op`; `jq`, `gh`, `git-lfs` where they are pinned, i.e. without
+root; the mirror), `agent-clis` (Codex), `blender`, `blender-mcp` (its git ref). Not reconciled:
+what is not pinned (Node ≥ 20 from the image, Grok/Cursor/Gemini/wrangler at latest, apt packages)
+and a repo's own dependencies (`node`, `python`, `rust` toolchains), which are the repo's to refresh.
+
+Per platform (from their docs, 2026-10-17):
+
+| Platform | Before each task on a cached container | Use |
+|---|---|---|
+| Codex Cloud (legacy environments) | **Maintenance script**: runs when a cached container is resumed, after the task's branch is checked out. The cache lasts up to 12 hours and is rebuilt when the setup script, maintenance script, environment variables or secrets change. ([docs](https://learn.chatgpt.com/docs/environments/cloud-environment)) | The line above. Setting it rebuilds the cache once. |
+| Codex Cloud (current environments) | No maintenance field: an Install script and a Start skill; the prepared filesystem is rebuilt by **Republish**. ([docs](https://learn.chatgpt.com/docs/environments/cloud-environments)) | Nothing to wire; republish after a pin change. |
+| Claude Code on the web | No maintenance field. The setup snapshot is rebuilt when the setup script or allowed hosts change, or after about seven days; a **SessionStart hook** runs on every session start and resume. ([docs](https://code.claude.com/docs/en/cloud-environments)) | Optional: a SessionStart hook (e.g. the session layer's) can run `bash "$CLOUD_SETUP_HOME/setup.sh" --reconcile`. |
+| Cursor Cloud agents | `install` runs only when a Build is made; after an agent boots from a Build, **`start`** runs. ([docs](https://cursor.com/docs/cloud-agent/setup)) | Optional: `start` in `environment.json` can run the line above. |
 
 ## What it guarantees
 - **Exit 0, always.** A failed step is recorded, never fatal: a non-zero setup script would stop
@@ -122,7 +154,9 @@ Versions live in `pins.env`; a weekly workflow (`scripts/bump-pins.sh`) opens a 
 ## Adding a module
 Add `modules/<name>.sh`. Its first line is `# <name> — <one-line description>` (shown by
 `--list`); it defines `setup()` (install; return non-zero on failure) and optionally `status()`
-(one line of versions) and `requires="other-module …"`. Modules run in their own process with
+(one line of versions), `requires="other-module …"`, and, for what it pins, `drift()` (print the
+pieces off their pin, one per line, nothing when all are right; fast, and it writes nothing) with
+`reconcile <piece>…` (reinstall those; reuse the check `setup()` starts with so the two agree). Modules run in their own process with
 `lib/common.sh` loaded, which provides `apt_install`, `link <name> <target>` (into `$BIN`), `ver`,
 `can_root`, and `$BIN`, `$OPT`, `$SHARE`, `$REPO`, `$SUDO` (empty as root, `sudo -n` with
 passwordless sudo, else a stub that fails saying so). A vendor installer that writes to `~` runs
@@ -132,7 +166,8 @@ a session repairs a snapshot. Run `bash tests/run.sh` and `shellcheck -x` before
 
 ## How updates land
 Sandboxes rebuild their snapshot when the setup-script text or network settings change, or after
-about a week. A change merged here reaches each sandbox at its next rebuild.
+about a week. A change merged here reaches each sandbox at its next rebuild, or at its next task
+where `--reconcile` runs before each one (above).
 
 ## License
 MIT, see `LICENSE`.

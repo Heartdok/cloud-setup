@@ -139,6 +139,9 @@ sha="$(git -C "$t/src" rev-parse HEAD)"
 [ $rc = 0 ] && [ -f "$t/dest/modules/core.sh" ] && [ "$(cat "$t/dest/.commit")" = "$sha" ] \
   && ok "bootstrap: tarball unpacked, commit id from its header" || no "bootstrap rc=$rc commit=$(cat "$t/dest/.commit" 2>/dev/null)"
 [ ! -e "$t/bh/.local/share/cloud-env/setup-result" ] && ok "--fetch-only installs nothing" || no "--fetch-only wrote a result"
+touch "$t/mark"; sleep 1
+(cd "$t" && env HOME="$t/bh" CLOUD_SETUP_HOME="$t/dest" CLOUD_SETUP_TARBALL="file://$t/src.tgz" bash -s -- --fetch-only < "$here/setup.sh")
+[ -z "$(find "$t" -mindepth 1 -maxdepth 1 -newer "$t/mark")" ] && [ -z "$(find "$t/dest" -newer "$t/mark")" ] && ok "bootstrap: the same commit again → the copy is left as it is" || no "bootstrap rewrote: $(find "$t" -maxdepth 1 -newer "$t/mark"; find "$t/dest" -newer "$t/mark")"
 (cd "$t" && env HOME="$t/bh" CLOUD_SETUP_HOME="$t/dest" CLOUD_SETUP_TARBALL="file://$t/missing.tgz" bash -s -- --fetch-only < "$here/setup.sh" 2>/dev/null)
 [ $? = 0 ] && [ -f "$t/dest/setup.sh" ] && ok "bootstrap: download fails → keeps the existing copy" || no "bootstrap kept copy"
 (cd "$t" && env HOME="$t/bh" CLOUD_SETUP_HOME="$t/nodest" CLOUD_SETUP_TARBALL="file://$t/missing.tgz" bash -s < "$here/setup.sh" 2>/dev/null); rc=$?
@@ -186,7 +189,7 @@ cat > "$NR/fake/curl" <<SH
 out=""; url=""
 while [ \$# -gt 0 ]; do case "\$1" in -o) out="\$2"; shift 2 ;; http*) url="\$1"; shift ;; *) shift ;; esac; done
 echo "\$url" >> "$NR/curl.log"
-f="$NR/rel/\${url#*/releases/download/}"
+case "\$url" in https://bun.sh/install) f="$NR/rel/bun-install.sh" ;; *) f="$NR/rel/\${url#*/releases/download/}" ;; esac
 [ -f "\$f" ] || exit 22
 if [ -n "\$out" ]; then cp "\$f" "\$out"; else cat "\$f"; fi
 SH
@@ -278,6 +281,36 @@ nr "$here/setup.sh" --repo "$NR/repo" >/dev/null
 [ "$(jq '[.hooks.SessionStart[].hooks[].command | select(endswith("# cloud-setup"))] | length' "$NR/home/.claude/settings.json")" = 1 ] && [ -x "$NR/home/.local/bin/gh" ] \
   && ok "writable HOME, plain user: SessionStart hook in ~/.claude, tools in ~/.local/bin" || no "writable HOME hook/tools"
 
+# --reconcile (Codex Cloud's Maintenance script, before every task on a cached container): nothing
+# off its pin → done in seconds, nothing written; a bumped pin → only that piece reinstalled.
+NS="$NR/home/.local/share/cloud-env"; prior="$(cat "$NS/setup-result")"
+rc_() { nr "$here/setup.sh" --repo "$NR/repo" --reconcile; }
+touch "$t/mark"; sleep 1; n="$(wc -l < "$NR/curl.log")"; s=$(date +%s)
+out="$(rc_)"; rc=$?; d=$(( $(date +%s) - s ))
+[ $rc = 0 ] && grep -q '^cloud-setup reconcile: nothing off its pin' <<<"$out" && [ $d -le 5 ] && [ "$(wc -l < "$NR/curl.log")" = "$n" ] \
+  && ok "reconcile: no drift → exit 0, ${d}s, no download" || no "reconcile no drift: rc=$rc ${d}s $out"
+[ -z "$(find "$NR/home" "$here" -newer "$t/mark" 2>/dev/null)" ] && ok "reconcile: no drift → nothing written (result, log, tools, this repo)" || no "reconcile wrote: $(find "$NR/home" "$here" -newer "$t/mark")"
+printf '#!/bin/sh\nv="${1#bun-v}"; [ "$v" = 1.9.8 ] && exit 1; mkdir -p "$BUN_INSTALL/bin" && printf "#!/bin/sh\\necho %%s\\n" "$v" > "$BUN_INSTALL/bin/bun" && chmod +x "$BUN_INSTALL/bin/bun"\n' > "$NR/rel/bun-install.sh"
+echo 1.9.9 > "$NR/repo/.bun-version"; n="$(wc -l < "$NR/curl.log")"
+out="$(rc_)"; rc=$?
+[ $rc = 0 ] && grep -q 'drift=core:bun core=ok' <<<"$out" && [ "$(nr -c ". '$here/lib/common.sh'; bun --version")" = 1.9.9 ] \
+  && [ "$(tail -n +"$((n + 1))" "$NR/curl.log")" = https://bun.sh/install ] \
+  && ok "reconcile: a repo's bun pin bump → only bun reinstalled, the new one first on PATH" || no "reconcile bun bump: rc=$rc $out / $(tail -n +"$((n + 1))" "$NR/curl.log")"
+[ "$(cat "$NS/setup-result")" = "$prior" ] && grep -q '^cloud-setup reconcile: drift=core:bun' "$NS/setup.log" \
+  && ! grep '^cloud-setup:' "$NS/setup.log" | grep -q reconcile \
+  && ok "reconcile: setup-result keeps the install's errors; no reconcile line reads as an install summary (^cloud-setup:)" || no "reconcile result/log: $(cat "$NS/setup-result")"
+out="$(rc_)"; grep -q 'nothing off its pin' <<<"$out" && ok "reconcile: after a fix, back to the fast path" || no "reconcile second run: $out"
+echo 1.9.8 > "$NR/repo/.bun-version"; out="$(rc_)"; rc=$?
+[ $rc = 0 ] && grep -q 'core=failed(1)' <<<"$out" && [ "$(cat "$NS/setup-result")" = "$prior; reconcile failed: core" ] \
+  && ok "reconcile: a failed reinstall → exit 0, named in setup-result after the install's errors" || no "reconcile failure: rc=$rc $out / $(cat "$NS/setup-result")"
+echo 1.9.9 > "$NR/repo/.bun-version"; rc_ >/dev/null
+[ "$(cat "$NS/setup-result")" = "$prior" ] && ok "reconcile: a later success clears its own earlier error, nothing else" || no "reconcile clear: $(cat "$NS/setup-result")"
+echo "running: office (since 00:00:00)" > "$NS/setup-result"; echo 1.9.8 > "$NR/repo/.bun-version"; rc_ >/dev/null
+[ "$(cat "$NS/setup-result")" = "running: office (since 00:00:00)" ] && ok "reconcile: a cut-off install's result is left for the session-time repair" || no "reconcile over running: $(cat "$NS/setup-result")"
+echo "$prior" > "$NS/setup-result"; rm -f "$NR/repo/.bun-version" "$NR/home/.local/bin/bun" "$NR/home/.local/bin/bunx"; rm -rf "$NR/home/.local/opt/bun"
+line="$(grep -m1 -o 'curl -fsSL https://raw.githubusercontent.com/[^ ]*/setup.sh | bash -s -- --reconcile || true' "$here/README.md")"
+[ -n "$line" ] && grep -qF "$line" "$here/setup.sh" && ok "README and setup.sh show the same Maintenance line" || no "Maintenance line drifted"
+
 # Root with a writable HOME (Codex Cloud's older universal image): BIN is /usr/local/bin, but the image's
 # own bun/gh sit ahead of it on PATH, and ~/.local/bin is what agents put first. Every link is mirrored
 # there. CLOUD_SETUP_BIN/OPT give the root layout without root.
@@ -309,6 +342,9 @@ env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; m
 env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; chmod 555 '$M/ub3'; link x '$M/tgt/bun'"; rc=$?; chmod 755 "$M/ub3"
 if [ -w "$M/ub3" ] && [ "$(id -u)" != 0 ]; then [ $rc != 0 ] && [ ! -e "$M/home3/.local/bin/x" ] && ok "link: a failed ln is reported, not masked by mirror_bin" || no "link masked ln failure rc=$rc"; fi
 
+[ -z "$(mir "mirror_stale bun owned cursor-agent vault")" ] && rm "$M/home/.local/bin/vault" && [ "$(mir "mirror_stale bun vault")" = vault ] \
+  && ok "mirror_stale: names only what mirror_bin would change (reconcile's mirror drift)" || no "mirror_stale: $(mir "mirror_stale bun owned cursor-agent vault")"
+mir "mirror_bin vault"
 # core's own shims and the uv/rust steps mirror too: an image npm/npx must not outrank them.
 mir ". '$here/modules/core.sh'; core_no_npm" 2>/dev/null   # BSD install cannot read a pipe for npx: only Linux gets both
 [ -L "$M/home/.local/bin/npm" ] && { [ ! -e "$M/usr-local-bin/npx" ] || [ -L "$M/home/.local/bin/npx" ]; } && ok "root layout: the npm/npx shims are mirrored" || no "npm shims not mirrored"
