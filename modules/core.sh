@@ -117,9 +117,9 @@ core_session_hook() {
 }
 
 core_uv() {
-  [ "$(ver uv --version)" = "$UV_PIN" ] && return 0
+  [ "$(ver uv --version)" = "$UV_PIN" ] && { mirror_bin uv uvx; return 0; }
   curl -LsSf "https://astral.sh/uv/${UV_PIN}/install.sh" | in_ihome env UV_INSTALL_DIR="$BIN" UV_NO_MODIFY_PATH=1 sh
-  hash -r; [ "$(ver uv --version)" = "$UV_PIN" ]
+  hash -r; mirror_bin uv uvx; [ "$(ver uv --version)" = "$UV_PIN" ]
 }
 
 core_node() { # keep an image's own Node >= 20; otherwise the pinned LTS tarball
@@ -143,10 +143,11 @@ case "$1" in
 esac
 echo "npm is disabled in this environment (Bun only). Use: $hint" >&2; exit 1
 SH
+  mirror_bin npm npx
 }
 
 core_bun() {
-  [ "$(bun --version 2>/dev/null)" = "$BUN_PIN" ] && return 0
+  [ "$(bun --version 2>/dev/null)" = "$BUN_PIN" ] && { mirror_bin bun bunx; return 0; }
   curl -fsSL https://bun.sh/install | in_ihome env BUN_INSTALL="$OPT/bun" bash -s -- "bun-v${BUN_PIN}" \
     && link bun "$OPT/bun/bin/bun" && link bunx "$OPT/bun/bin/bun"
   hash -r; [ "$(bun --version)" = "$BUN_PIN" ]

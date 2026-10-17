@@ -55,12 +55,31 @@ if CLOUD_PREFIX="$(cloud_prefix)"; then
 else # unchanged: a writable HOME (or root)
   CLOUD_PREFIX=""
   if [ "$(id -u)" = 0 ]; then BIN=/usr/local/bin; OPT=/opt; else BIN="$HOME/.local/bin"; OPT="$HOME/.local/opt"; fi
+  BIN="${CLOUD_SETUP_BIN:-$BIN}"; OPT="${CLOUD_SETUP_OPT:-$OPT}"   # tests (root layout without root); unset in real runs
   SHARE="${CLOUD_ENV_SHARE:-$HOME/.local/share/cloud-env}"
 fi
 export PATH="$BIN:$HOME/.local/bin:$HOME/.bun/bin:$PATH" # what we install wins over the image's
 mkdir -p "$BIN" "$OPT" "$SHARE"
 
-link() { ln -sfn "$2" "$BIN/$1"; } # name target
+# With a writable HOME and a BIN elsewhere (root: /usr/local/bin), an image's own copies of what we
+# pin or wrap (Codex's older universal image: Bun 1.2.14 from ~/.bun/bin, its own gh) sit on a PATH
+# ahead of /usr/local/bin, while ~/.local/bin is the one directory agents put first (the documented
+# `export PATH=$HOME/.local/bin:$PATH`). So each command we install is also reachable there, as a
+# symlink to $BIN/<name> (a later replacement of that file is followed). A real file already there
+# is the owner's and stays; with BIN = ~/.local/bin (plain user) or a read-only HOME this is a no-op.
+mirror_bin() { # name...
+  [ "$RO_HOME" = 0 ] && [ "$BIN" != "$HOME/.local/bin" ] || return 0
+  local n m="$HOME/.local/bin"
+  mkdir -p "$m" 2>/dev/null || return 0
+  for n in "$@"; do
+    { [ -e "$BIN/$n" ] || [ -L "$BIN/$n" ]; } || continue
+    [ "$BIN/$n" -ef "$m/$n" ] && continue                     # already the same file (or a loop)
+    { [ -e "$m/$n" ] || [ -L "$m/$n" ]; } && [ ! -L "$m/$n" ] && continue
+    ln -sfn "$BIN/$n" "$m/$n"
+  done
+  return 0
+}
+link() { ln -sfn "$2" "$BIN/$1"; mirror_bin "$1"; } # name target
 # A third-party installer that writes to ~ (shell rc files, receipts, its own home): with a
 # read-only HOME it gets IHOME instead, so it neither fails nor touches ~. Otherwise unchanged.
 in_ihome() { if [ "$RO_HOME" = 1 ]; then HOME="$IHOME" "$@"; else "$@"; fi; }

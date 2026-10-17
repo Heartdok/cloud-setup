@@ -33,6 +33,7 @@ rust_wrappers() {
       "$n" "$RUSTUP_HOME" "$CARGO_HOME" "$CARGO_HOME/bin/$n" > "$tmp" \
       && chmod 755 "$tmp" && mv -f "$tmp" "$BIN/$n" || { rm -f "$tmp"; return 1; }
   done
+  mirror_bin $RUST_WRAPPERS   # word list
   hash -r
 }
 
