@@ -72,14 +72,18 @@ mirror_bin() { # name...
   local n m="$HOME/.local/bin"
   mkdir -p "$m" 2>/dev/null || return 0
   for n in "$@"; do
-    { [ -e "$BIN/$n" ] || [ -L "$BIN/$n" ]; } || continue
+    if [ ! -e "$BIN/$n" ]; then   # missing, dangling or cyclic: nothing valid to mirror
+      # a mirror we made earlier that now points at that is repaired by removal, never linked back
+      [ -L "$m/$n" ] && [ "$(readlink "$m/$n")" = "$BIN/$n" ] && rm -f "$m/$n"
+      continue
+    fi
     [ "$BIN/$n" -ef "$m/$n" ] && continue                     # already the same file (or a loop)
     { [ -e "$m/$n" ] || [ -L "$m/$n" ]; } && [ ! -L "$m/$n" ] && continue
     ln -sfn "$BIN/$n" "$m/$n"
   done
   return 0
 }
-link() { ln -sfn "$2" "$BIN/$1"; mirror_bin "$1"; } # name target
+link() { ln -sfn "$2" "$BIN/$1" && mirror_bin "$1"; } # name target
 # A third-party installer that writes to ~ (shell rc files, receipts, its own home): with a
 # read-only HOME it gets IHOME instead, so it neither fails nor touches ~. Otherwise unchanged.
 in_ihome() { if [ "$RO_HOME" = 1 ]; then HOME="$IHOME" "$@"; else "$@"; fi; }

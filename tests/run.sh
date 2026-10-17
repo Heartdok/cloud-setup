@@ -297,6 +297,18 @@ mir "link bun '$M/tgt/owned'; mirror_bin bun"; [ "$(readlink "$M/usr-local-bin/b
 rm -rf "$M/home2"; mkdir -p "$M/home2"
 env HOME="$M/home2" CLOUD_SETUP_BIN="$M/home2/.local/bin" bash -c ". '$here/lib/common.sh'; link bun '$M/tgt/bun'; RO_HOME=1 BIN='$M/usr-local-bin' mirror_bin bun"
 [ -L "$M/home2/.local/bin/bun" ] && [ "$(readlink "$M/home2/.local/bin/bun")" = "$M/tgt/bun" ] && ok "plain user (BIN is ~/.local/bin) and a read-only HOME: no mirror, nothing extra" || no "mirror when BIN is ~/.local/bin: $(ls -l "$M/home2/.local/bin")"
+# A BIN link to a ~/.local/bin file that is missing must not get the reverse link (a 2-link cycle that reruns kept);
+# a cycle already there is repaired. link() keeps ln's failure.
+rm -rf "$M/home3"; mkdir -p "$M/home3/.local/bin" "$M/ub3"
+ln -s "$M/home3/.local/bin/dang" "$M/ub3/dang"
+env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; mirror_bin dang; mirror_bin dang"
+[ ! -e "$M/home3/.local/bin/dang" ] && [ ! -L "$M/home3/.local/bin/dang" ] && ok "mirror_bin: a BIN link to a missing ~/.local/bin file is not mirrored back (no cycle)" || no "mirror cycle: $(ls -l "$M/home3/.local/bin")"
+ln -s "$M/ub3/dang" "$M/home3/.local/bin/dang"   # a cycle from an earlier version
+env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; mirror_bin dang"
+[ ! -L "$M/home3/.local/bin/dang" ] && ok "mirror_bin: an existing 2-link cycle is repaired" || no "cycle kept"
+env HOME="$M/home3" CLOUD_SETUP_BIN="$M/ub3" bash -c ". '$here/lib/common.sh'; chmod 555 '$M/ub3'; link x '$M/tgt/bun'"; rc=$?; chmod 755 "$M/ub3"
+if [ -w "$M/ub3" ] && [ "$(id -u)" != 0 ]; then [ $rc != 0 ] && [ ! -e "$M/home3/.local/bin/x" ] && ok "link: a failed ln is reported, not masked by mirror_bin" || no "link masked ln failure rc=$rc"; fi
+
 # core's own shims and the uv/rust steps mirror too: an image npm/npx must not outrank them.
 mir ". '$here/modules/core.sh'; core_no_npm" 2>/dev/null   # BSD install cannot read a pipe for npx: only Linux gets both
 [ -L "$M/home/.local/bin/npm" ] && { [ ! -e "$M/usr-local-bin/npx" ] || [ -L "$M/home/.local/bin/npx" ]; } && ok "root layout: the npm/npx shims are mirrored" || no "npm shims not mirrored"
