@@ -59,7 +59,7 @@ writes nothing.** It exits 0 always, and leaves a missing or cut-off `setup-resu
 session-time repair.
 
 Reconciled: `core` (uv, Bun, pandoc, `op`; `jq`, `gh`, `git-lfs` where they are pinned, i.e. without
-root; the mirror), `agent-clis` (Codex), `blender`, `blender-mcp` (its git ref), `formal` (Apalache, Dafny). Not reconciled:
+root; the mirror), `agent-clis` (Codex), `blender`, `blender-mcp` (its git ref), `formal` (Quint, its evaluator, LemmaScript, Apalache, Dafny), `kani`. Not reconciled:
 what is not pinned (Node ≥ 20 from the image, Grok/Cursor/Gemini/wrangler at latest, apt packages)
 and a repo's own dependencies (`node`, `python`, `rust` toolchains), which are the repo's to refresh.
 
@@ -127,7 +127,8 @@ same budget). A project's Bun version (`.bun-version`, or `"packageManager": "bu
 | `python` | the project's Python and locked deps (`uv sync --frozen`) |
 | `node` | the project's JS deps (`bun install --frozen-lockfile`) |
 | `wrangler` | Cloudflare's CLI |
-| `formal` | Apalache (which `quint verify` runs, also placed in `~/.quint` so Quint downloads nothing) and Dafny (which LemmaScript checks with), pinned and sha256-verified; a JRE when no `java` is on PATH |
+| `formal` | Quint (global, with its Rust evaluator and Apalache placed in `~/.quint`, so Quint downloads nothing) and LemmaScript's `lsc` with Dafny, pinned, releases sha256-verified; a JRE when no `java` is on PATH |
+| `kani` | the Kani Rust model checker (`cargo kani`): `cargo install kani-verifier`, then its own setup (bundle and nightly toolchain), the largest download here (pulls in `rust`) |
 | `rust` | a user-space Rust toolchain from our own rustup (never the image's): each repo's `rust-toolchain[.toml]` pin, else stable minimal. In `~/.cargo` + `~/.rustup`, or `<prefix>/opt/{cargo,rustup}` with a read-only HOME; wrappers for `cargo`, `rustc`, `rustup`, `rustfmt`, `cargo-clippy`, `clippy-driver`, `rustdoc` in the bin dir set `RUSTUP_HOME`/`CARGO_HOME`, so `<prefix>/bin` on `PATH` is enough |
 | `tailscale` | the Tailscale client, installed only |
 
