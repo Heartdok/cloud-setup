@@ -125,17 +125,24 @@ status() { echo "node=$(ver node --version) uv=$(ver uv --version) bun=$(ver bun
 # scripts/cloud/session-start.sh instead: in Claude Code remote sessions only, and not when the
 # project's settings already run it. Tagged so reruns replace it rather than add another.
 CORE_SESSION_HOOK='[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0; p="${CLAUDE_PROJECT_DIR:-$PWD}"; grep -qs scripts/cloud/session-start.sh "$p/.claude/settings.json" && exit 0; for d in "$p" /home/*/* /root/*; do [ -f "$d/scripts/cloud/session-start.sh" ] && { bash "$d/scripts/cloud/session-start.sh"; break; }; done; true # cloud-setup'
+# Session logs: in a project whose shared folder has opted in (/mnt/project-files/.session-logs/
+# exists), copy this session's transcript and its subagents' into it, gzipped, at most every 10
+# minutes on Stop and always on SessionEnd, since a container can be reclaimed without warning.
+CORE_LOG_HOOK='[ "${CLAUDE_CODE_REMOTE:-}" = true ] || exit 0; d="${SESSION_LOGS_DIR:-/mnt/project-files/.session-logs}"; [ -d "$d/" ] || exit 0; i="$(cat)"; t="$(printf %s "$i" | jq -r ".transcript_path // empty")"; e="$(printf %s "$i" | jq -r ".hook_event_name // empty")"; [ -f "$t" ] || exit 0; n="${CLAUDE_CODE_REMOTE_SESSION_ID:-$(basename "$t" .jsonl)}"; o="$d/$n.tar.gz"; [ "$e" != SessionEnd ] && [ -n "$(find "$o" -mmin -10 2>/dev/null)" ] && exit 0; b="$(basename "$t" .jsonl)"; ( cd "$(dirname "$t")" && tar -czf "$o.tmp" "$b.jsonl" $( [ -d "$b" ] && echo "$b" ) 2>/dev/null && mv -f "$o.tmp" "$o" ) >/dev/null 2>&1 & true # cloud-setup'
 core_session_hook() {
   local s="$HOME/.claude/settings.json"
   if [ "$RO_HOME" = 1 ]; then # Codex Cloud: no Claude Code there, and ~/.claude cannot be written
     echo "core: HOME is read-only; user-level Claude Code SessionStart hook skipped"; return 0
   fi
   mkdir -p "$HOME/.claude"; [ -s "$s" ] || echo '{}' > "$s"
-  jq --arg c "$CORE_SESSION_HOOK" '
+  jq --arg c "$CORE_SESSION_HOOK" --arg l "$CORE_LOG_HOOK" '
     .hooks.SessionStart = ([.hooks.SessionStart // [] | .[]
                             | select([.hooks[]?.command] | any(endswith("# cloud-setup")) | not)]
                            + [{matcher: "startup|resume|clear|compact",
-                               hooks: [{type: "command", command: $c, timeout: 300}]}])' \
+                               hooks: [{type: "command", command: $c, timeout: 300}]}])
+    | reduce ("Stop", "SessionEnd") as $k (.; .hooks[$k] = ([.hooks[$k] // [] | .[]
+                            | select([.hooks[]?.command] | any(endswith("# cloud-setup")) | not)]
+                           + [{hooks: [{type: "command", command: $l, timeout: 30}]}]))' \
     "$s" > "$s.new" || { rm -f "$s.new"; return 1; }
   if cmp -s "$s" "$s.new"; then rm -f "$s.new"; else mv "$s.new" "$s"; fi
 }
