@@ -60,7 +60,7 @@ session-time repair.
 
 Reconciled: `core` (uv, Bun, pandoc, `op`; `jq`, `gh`, `git-lfs` where they are pinned, i.e. without
 root; the mirror), `agent-clis` (Codex), `blender`, `blender-mcp` (its git ref), `formal` (Quint, its evaluator, LemmaScript, Apalache, Dafny), `kani`. Not reconciled:
-what is not pinned (Node ≥ 20 from the image, Grok/Cursor/Gemini/wrangler at latest, apt packages)
+what is not pinned (Node ≥ 20 from the image, Grok/Cursor/Gemini/agy/wrangler at latest, apt packages)
 and a repo's own dependencies (`node`, `python`, `rust` toolchains), which are the repo's to refresh.
 
 Per platform (from their docs, 2026-10-17):
@@ -121,6 +121,7 @@ same budget). A project's Bun version (`.bun-version`, or `"packageManager": "bu
 |---|---|
 | `core` (always) | apt basics, `gh`, `jq`, `git-lfs`, uv, Bun, Node (if missing or < 20), pandoc, 1Password CLI `op`; a user-level Claude Code SessionStart hook that runs a project's `scripts/cloud/session-start.sh`. Bun is the only JS package manager: `npx` runs `bunx` and `npm` refuses with the bun equivalent. |
 | `agent-clis` | Codex, Grok, Cursor Agent (`cursor-agent`) and Gemini CLIs. No sign-in. |
+| `agy` | Google's Antigravity CLI (`agy`), latest; it updates itself. No sign-in: the session layer pulls its login from the vault |
 | `blender` | headless Blender, pinned and sha256-verified, with its system libraries and xvfb |
 | `blender-mcp` | Blender Lab's MCP server as a uv tool, plus a `cloud-env-blender-mcp` launcher for `.mcp.json` (pulls in `blender`) |
 | `office` | LibreOffice (headless), poppler, qpdf, ImageMagick, Office-metric fonts, python-docx/pptx/openpyxl/pandas/markitdown, docx/pptxgenjs/exceljs |

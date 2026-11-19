@@ -525,4 +525,16 @@ else
   [ "$(RS_REPO="$RS/repo" rsmod status "$RH")" = "rust=1.97.1" ] && ok "rust: read-only HOME: status → rust=1.97.1" || no "rust read-only status"
 fi
 
+# agy: a present binary is linked without a download; a failed download links nothing and fails
+AG="$t/agy"; mkdir -p "$AG/home/.local/bin" "$AG/bin" "$AG/stub" "$AG/home2"
+printf '#!/bin/sh\necho curl >> "%s/calls"; exit 7\n' "$AG" > "$AG/stub/curl"; chmod +x "$AG/stub/curl"
+printf '#!/bin/sh\necho 1.5.12\n' > "$AG/home/.local/bin/agy"; chmod +x "$AG/home/.local/bin/agy"
+agmod() { HOME="$1" PATH="$AG/stub:$PATH" CLOUD_SETUP_HOME="$here" bash -c ". '$here/lib/common.sh'; BIN='$AG/bin'; run_module $2 agy"; }
+agmod "$AG/home" setup && [ "$(readlink "$AG/bin/agy")" = "$AG/home/.local/bin/agy" ] && [ ! -e "$AG/calls" ] \
+  && [ "$(PATH="$AG/bin:$PATH" agmod "$AG/home" status)" = "agy=1.5.12" ] \
+  && ok "agy: a present binary is linked, nothing downloaded; status → agy=1.5.12" || no "agy present: $(ls -la "$AG/bin")"
+rm -f "$AG/bin/agy"
+! agmod "$AG/home2" setup 2>/dev/null && [ ! -e "$AG/bin/agy" ] && [ -s "$AG/calls" ] \
+  && ok "agy: a failed download → non-zero, nothing linked" || no "agy failed download"
+
 exit $fail
