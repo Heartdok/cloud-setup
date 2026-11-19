@@ -549,7 +549,8 @@ cat > "$CP/bin/python3" <<PY
 if [ "\$1" = -m ]; then echo "\$*" >> "$CP/pip.log"; [ -z "\${CP_FAIL:-}" ] || exit 1; echo "$CP_PIN" > "$CP/have"; exit 0; fi
 [ -s "$CP/have" ] && cat "$CP/have" || exit 1
 PY
-chmod +x "$CP/bin/python3"
+printf '#!/bin/sh\n[ "$1" = -n ] && shift; exec "$@"\n' > "$CP/bin/sudo"   # a runner's real sudo would drop CP_FAIL
+chmod +x "$CP/bin/python3" "$CP/bin/sudo"
 cpmod() { env PATH="$CP/bin:$PATH" CLOUD_SETUP_HOME="$here" "$@" bash -c ". '$here/lib/common.sh'; run_module setup cpsat"; }
 ! cpmod CP_FAIL=1 2>/dev/null && [ ! -s "$CP/have" ] && ok "cpsat: pip failing → non-zero" || no "cpsat failing pip"
 : > "$CP/pip.log"; cpmod && grep -q "install --quiet --disable-pip-version-check ortools==$CP_PIN" "$CP/pip.log" \
