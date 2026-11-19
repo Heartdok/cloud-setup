@@ -7,8 +7,9 @@ cpsat_have() { [ "$(python3 -c 'import ortools; print(ortools.__version__)' 2>/d
 
 setup() {
   cpsat_have && return 0
-  command -v python3 >/dev/null || { echo "cpsat: no python3 on PATH" >&2; return 1; }
-  local pip=(python3 -m pip install --quiet --disable-pip-version-check "ortools==$ORTOOLS_PIN")
+  local py; py="$(command -v python3)" || { echo "cpsat: no python3 on PATH" >&2; return 1; }
+  local pip=("$py" -m pip install --quiet --disable-pip-version-check "ortools==$ORTOOLS_PIN")
+  # sudo's own PATH may find another python3, hence the absolute path.
   # shellcheck disable=SC2206 # $SUDO is empty, `sudo -n` or a refusing stub: split on purpose
   if can_root; then pip=($SUDO "${pip[@]}"); else pip+=(--user); fi
   # Debian-family pythons refuse pip outside a venv (PEP 668); this python3 is the sandbox's own.
