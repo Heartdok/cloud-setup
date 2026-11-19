@@ -5,9 +5,11 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0; ok() { echo "  ✓ $*"; }; no() { echo "  ✗ $*"; fail=1; }
 t="$(mktemp -d)"; trap 'chmod -R u+w "$t" 2>/dev/null; rm -rf "$t"' EXIT
-# As root, BIN is /usr/local/bin and OPT /opt: a test that installs would overwrite the machine's own cargo or
-# rustc with links into $t, which the trap then deletes. Every test installs under $t unless it names its own.
-export CLOUD_SETUP_BIN="$t/usr-local-bin" CLOUD_SETUP_OPT="$t/opt"; mkdir -p "$CLOUD_SETUP_BIN" "$CLOUD_SETUP_OPT"
+# As root, BIN is /usr/local/bin and OPT /opt, and every link is mirrored into ~/.local/bin: a test that
+# installs would leave the machine's own cargo, rustc or gh pointing into $t, which the trap then deletes.
+# Every test installs under $t, with a HOME there, unless it names its own.
+export CLOUD_SETUP_BIN="$t/usr-local-bin" CLOUD_SETUP_OPT="$t/opt" HOME="$t/home0"
+mkdir -p "$CLOUD_SETUP_BIN" "$CLOUD_SETUP_OPT" "$HOME"
 lib() { bash -c ". '$here/lib/common.sh'; $1"; }
 unset OP_CONNECT_HOST OP_CONNECT_TOKEN   # the session-layer hand-off is tested on purpose, below
 
