@@ -5,6 +5,11 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 fail=0; ok() { echo "  ✓ $*"; }; no() { echo "  ✗ $*"; fail=1; }
 t="$(mktemp -d)"; trap 'chmod -R u+w "$t" 2>/dev/null; rm -rf "$t"' EXIT
+# As root, BIN is /usr/local/bin and OPT /opt, and every link is mirrored into ~/.local/bin: a test that
+# installs would leave the machine's own cargo, rustc or gh pointing into $t, which the trap then deletes.
+# Every test installs under $t, with a HOME there, unless it names its own.
+export CLOUD_SETUP_BIN="$t/usr-local-bin" CLOUD_SETUP_OPT="$t/opt" HOME="$t/home0"
+mkdir -p "$CLOUD_SETUP_BIN" "$CLOUD_SETUP_OPT" "$HOME"
 lib() { bash -c ". '$here/lib/common.sh'; $1"; }
 unset OP_CONNECT_HOST OP_CONNECT_TOKEN   # the session-layer hand-off is tested on purpose, below
 
@@ -264,8 +269,8 @@ WH="$t/wh"; mkdir -p "$WH/home" "$WH/ws" "$WH/fake"
 printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }; exec %s "$@"\n' "$realid" > "$WH/fake/id"; chmod +x "$WH/fake/id"
 paths='echo "$BIN|$OPT|$SHARE|$RO_HOME|$CLOUD_PREFIX|$IHOME"'
 knobs=(CLOUD_SETUP_PREFIX="$WH/ws/p" CLOUD_SETUP_WORKSPACE="$WH/ws")
-[ "$(env "${knobs[@]}" HOME="$WH/home" PATH="$WH/fake:$PATH" bash -c ". '$here/lib/common.sh' 2>/dev/null; $paths")" = "/usr/local/bin|/opt|$WH/home/.local/share/cloud-env|0||$WH/home" ] \
-  && ok "writable HOME, root: /usr/local/bin, /opt, ~/.local/share/cloud-env as before (prefix knobs ignored)" || no "root paths: $(env "${knobs[@]}" HOME="$WH/home" PATH="$WH/fake:$PATH" bash -c ". '$here/lib/common.sh' 2>/dev/null; $paths")"
+[ "$(env -u CLOUD_SETUP_BIN -u CLOUD_SETUP_OPT "${knobs[@]}" HOME="$WH/home" PATH="$WH/fake:$PATH" bash -c ". '$here/lib/common.sh' 2>/dev/null; $paths")" = "/usr/local/bin|/opt|$WH/home/.local/share/cloud-env|0||$WH/home" ] \
+  && ok "writable HOME, root: /usr/local/bin, /opt, ~/.local/share/cloud-env as before (prefix knobs ignored)" || no "root paths: $(env -u CLOUD_SETUP_BIN -u CLOUD_SETUP_OPT "${knobs[@]}" HOME="$WH/home" PATH="$WH/fake:$PATH" bash -c ". '$here/lib/common.sh' 2>/dev/null; $paths")"
 [ "$(nr -c "export ${knobs[*]}; HOME='$WH/home'; . '$here/lib/common.sh'; $paths")" = "$WH/home/.local/bin|$WH/home/.local/opt|$WH/home/.local/share/cloud-env|0||$WH/home" ] \
   && ok "writable HOME, plain user: ~/.local as before (prefix knobs ignored)" || no "user paths: $(nr -c "export ${knobs[*]}; HOME='$WH/home'; . '$here/lib/common.sh'; $paths")"
 dh() { eval "$(sed -n '/^ro_prefix() {/,/^}/p;/^default_home() {/,/^}/p' "$here/setup.sh")"; default_home; }
@@ -524,5 +529,34 @@ else
     && ok "rust: read-only HOME: an agent that only has <prefix>/bin on PATH gets the right RUSTUP_HOME/CARGO_HOME" || no "rust read-only agent PATH: $(env -i RS_FIX="$RS_FIX" RS_LOG="$RS_LOG" PATH="$P/bin:/usr/bin:/bin" "$NR/tools/bash" -c "cargo test; rustc -V" 2>&1)"
   [ "$(RS_REPO="$RS/repo" rsmod status "$RH")" = "rust=1.97.1" ] && ok "rust: read-only HOME: status → rust=1.97.1" || no "rust read-only status"
 fi
+
+# agy: a present binary is linked without a download; a failed download links nothing and fails
+AG="$t/agy"; mkdir -p "$AG/home/.local/bin" "$AG/bin" "$AG/stub" "$AG/home2"
+printf '#!/bin/sh\necho curl >> "%s/calls"; exit 7\n' "$AG" > "$AG/stub/curl"; chmod +x "$AG/stub/curl"
+printf '#!/bin/sh\necho 1.5.12\n' > "$AG/home/.local/bin/agy"; chmod +x "$AG/home/.local/bin/agy"
+agmod() { HOME="$1" PATH="$AG/stub:$PATH" CLOUD_SETUP_HOME="$here" bash -c ". '$here/lib/common.sh'; BIN='$AG/bin'; run_module $2 agy"; }
+agmod "$AG/home" setup && [ "$(readlink "$AG/bin/agy")" = "$AG/home/.local/bin/agy" ] && [ ! -e "$AG/calls" ] \
+  && [ "$(PATH="$AG/bin:$PATH" agmod "$AG/home" status)" = "agy=1.5.12" ] \
+  && ok "agy: a present binary is linked, nothing downloaded; status → agy=1.5.12" || no "agy present: $(ls -la "$AG/bin")"
+rm -f "$AG/bin/agy"
+! agmod "$AG/home2" setup 2>/dev/null && [ ! -e "$AG/bin/agy" ] && [ -s "$AG/calls" ] \
+  && ok "agy: a failed download → non-zero, nothing linked" || no "agy failed download"
+
+# cpsat: the pinned OR-Tools present → no pip; missing → pip installs the pin; pip failing → non-zero
+CP="$t/cpsat"; mkdir -p "$CP/bin"; CP_PIN="$(. "$here/pins.env"; echo "$ORTOOLS_PIN")"
+cat > "$CP/bin/python3" <<PY
+#!/bin/sh
+if [ "\$1" = -m ]; then echo "\$*" >> "$CP/pip.log"; [ -z "\${CP_FAIL:-}" ] || exit 1; echo "$CP_PIN" > "$CP/have"; exit 0; fi
+[ -s "$CP/have" ] && cat "$CP/have" || exit 1
+PY
+printf '#!/bin/sh\n[ "$1" = -n ] && shift; exec "$@"\n' > "$CP/bin/sudo"   # a runner's real sudo would drop CP_FAIL
+chmod +x "$CP/bin/python3" "$CP/bin/sudo"
+cpmod() { env PATH="$CP/bin:$PATH" CLOUD_SETUP_HOME="$here" "$@" bash -c ". '$here/lib/common.sh'; run_module setup cpsat"; }
+! cpmod CP_FAIL=1 2>/dev/null && [ ! -s "$CP/have" ] && ok "cpsat: pip failing → non-zero" || no "cpsat failing pip"
+: > "$CP/pip.log"; cpmod && grep -q "install --quiet --disable-pip-version-check ortools==$CP_PIN" "$CP/pip.log" \
+  && [ "$(env PATH="$CP/bin:$PATH" bash -c ". '$here/lib/common.sh'; run_module status cpsat")" = "ortools=$CP_PIN" ] \
+  && ok "cpsat: missing → pip installs ortools==$CP_PIN; status names it" || no "cpsat install: $(cat "$CP/pip.log")"
+: > "$CP/pip.log"; cpmod && [ ! -s "$CP/pip.log" ] && [ -z "$(env PATH="$CP/bin:$PATH" bash -c ". '$here/lib/common.sh'; run_module drift cpsat")" ] \
+  && ok "cpsat: the pin present → no pip, no drift" || no "cpsat present: $(cat "$CP/pip.log")"
 
 exit $fail
