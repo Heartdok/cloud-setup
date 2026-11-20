@@ -461,7 +461,7 @@ printf 'rust\n' > "$RS/repo/scripts/cloud/manifest"; printf 'node\n' > "$RS/repo
 rsmod() {
   local phase="$1" h="$2"; shift 2
   env HOME="$h" PATH="$RS/fake:$RS/sys:$PATH" REPO="${RS_REPO:-}" REPOS="${RS_REPOS:-${RS_REPO:-}}" CLOUD_SETUP_WORKSPACE="$RS/ws" \
-    CLOUD_SETUP_PREFIX= "$@" bash -c ". '$here/lib/common.sh'; run_module $phase rust"
+    CLOUD_SETUP_PREFIX= CLOUD_SETUP_CARGO_LINK= "$@" bash -c ". '$here/lib/common.sh'; run_module $phase rust"
 }
 wrap() { printf '#!/bin/sh\n# cloud-setup rust: run the real %s from our own rustup\nexport RUSTUP_HOME=%s CARGO_HOME=%s\nexec %s/bin/%s "$@"\n' "$1" "$2" "$3" "$3" "$1"; }
 
@@ -480,6 +480,16 @@ miss=""; for n in cargo rustc rustup rustfmt cargo-clippy clippy-driver rustdoc;
   && ok "rust: wrappers for cargo rustc rustup rustfmt cargo-clippy clippy-driver rustdoc in \$BIN" || no "rust wrappers:$miss"
 [ "$(env RUSTUP_HOME=/image/rustup CARGO_HOME=/image/cargo "$H1/.local/bin/cargo" build)" = "cargo RUSTUP_HOME=$H1/.rustup CARGO_HOME=$H1/.cargo build" ] \
   && ok "rust: a wrapper overrides the image's RUSTUP_HOME/CARGO_HOME and passes arguments" || no "rust wrapper env"
+# The wrappers name CARGO_HOME by a fixed link to ours, so cargo records the same dependency paths on every
+# machine; a path that is taken by something else leaves our own home in place.
+mkdir -p "$RS/optc"; RS_REPO="$RS/repo" rsmod setup "$H1" CLOUD_SETUP_CARGO_LINK="$RS/optc/cargo"
+[ "$(readlink "$RS/optc/cargo")" = "$H1/.cargo" ] && grep -qF "CARGO_HOME=$RS/optc/cargo" "$H1/.local/bin/cargo" \
+  && grep -qF "exec $H1/.cargo/bin/cargo" "$H1/.local/bin/cargo" \
+  && ok "rust: wrappers name CARGO_HOME by the /opt/cargo link and run the real proxy" || no "rust cargo link: $(cat "$H1/.local/bin/cargo")"
+rm "$RS/optc/cargo"; mkdir "$RS/optc/cargo"; RS_REPO="$RS/repo" rsmod setup "$H1" CLOUD_SETUP_CARGO_LINK="$RS/optc/cargo"
+[ -d "$RS/optc/cargo" ] && [ ! -L "$RS/optc/cargo" ] && grep -qF "CARGO_HOME=$H1/.cargo" "$H1/.local/bin/cargo" \
+  && ok "rust: a link path taken by a directory is left alone, and the wrappers keep our home" || no "rust cargo link taken"
+RS_REPO="$RS/repo" rsmod setup "$H1"
 # A system rustup first on PATH is not reused: ours is installed, and $BIN's wrapper is what `rustup` resolves to.
 [ "$(env PATH="$H1/.local/bin:$RS/sys:$PATH" bash -c 'command -v rustup')" = "$H1/.local/bin/rustup" ] && [ "$(PATH="$H1/.local/bin:$RS/sys:$PATH" rustup --version)" = "rustup 1.99.0 (ours) RUSTUP_HOME=$H1/.rustup CARGO_HOME=$H1/.cargo" ] \
   && ok "rust: an existing system rustup is not reused (ours wins on PATH)" || no "rust system rustup shadowing"

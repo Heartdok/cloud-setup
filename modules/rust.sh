@@ -23,14 +23,27 @@ rust_install_rustup() {
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal )
 }
 
+# The CARGO_HOME the wrappers name. Cargo fingerprints a dependency by its absolute source path under
+# CARGO_HOME, so a target/ built on another machine (Kryn's ci/fetch-target.sh) stays fresh only when both
+# name the same home: /opt/cargo, a link to ours, wherever we can make it (CLOUD_SETUP_CARGO_LINK; empty
+# skips it). Cargo never resolves the link, so the path it records is the link's.
+rust_cargo_home() {
+  local link="${CLOUD_SETUP_CARGO_LINK-/opt/cargo}"
+  if [ -n "$link" ] && { [ "$(readlink "$link" 2>/dev/null)" = "$CARGO_HOME" ] \
+    || { { [ ! -e "$link" ] || [ -L "$link" ]; } \
+      && { ln -sfn "$CARGO_HOME" "$link" 2>/dev/null || { can_root && $SUDO ln -sfn "$CARGO_HOME" "$link" 2>/dev/null; }; }; }; }
+  then echo "$link"; else echo "$CARGO_HOME"; fi
+}
+
 # The wrappers, written to a temp name and renamed so an existing $BIN/<name> (a symlink to the
 # image's copy, say) is replaced, never written through.
 rust_wrappers() {
-  local n tmp
+  local n tmp home
+  home="$(rust_cargo_home)"
   for n in $RUST_WRAPPERS; do
     tmp="$BIN/.$n.$$"
     printf '#!/bin/sh\n# cloud-setup rust: run the real %s from our own rustup\nexport RUSTUP_HOME=%q CARGO_HOME=%q\nexec %q "$@"\n' \
-      "$n" "$RUSTUP_HOME" "$CARGO_HOME" "$CARGO_HOME/bin/$n" > "$tmp" \
+      "$n" "$RUSTUP_HOME" "$home" "$CARGO_HOME/bin/$n" > "$tmp" \
       && chmod 755 "$tmp" && mv -f "$tmp" "$BIN/$n" || { rm -f "$tmp"; return 1; }
   done
   mirror_bin $RUST_WRAPPERS   # word list
