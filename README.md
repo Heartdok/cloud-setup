@@ -131,7 +131,7 @@ same budget). A project's Bun version (`.bun-version`, or `"packageManager": "bu
 | `formal` | Quint (global, with its Rust evaluator and Apalache placed in `~/.quint`, so Quint downloads nothing) and LemmaScript's `lsc` with Dafny, pinned, releases sha256-verified; a JRE when no `java` is on PATH |
 | `cpsat` | Google OR-Tools (`ORTOOLS_PIN`) into the image's `python3` with pip, for CP-SAT: `from ortools.sat.python import cp_model` |
 | `kani` | the Kani Rust model checker (`cargo kani`): `cargo install kani-verifier`, then its own setup (bundle and nightly toolchain), the largest download here (pulls in `rust`) |
-| `rust` | a user-space Rust toolchain from our own rustup (never the image's): each repo's `rust-toolchain[.toml]` pin, else stable minimal. In `~/.cargo` + `~/.rustup`, or `<prefix>/opt/{cargo,rustup}` with a read-only HOME; wrappers for `cargo`, `rustc`, `rustup`, `rustfmt`, `cargo-clippy`, `clippy-driver`, `rustdoc` in the bin dir set `RUSTUP_HOME`/`CARGO_HOME`, so `<prefix>/bin` on `PATH` is enough |
+| `rust` | a user-space Rust toolchain from our own rustup (never the image's): each repo's `rust-toolchain[.toml]` pin, else stable minimal. In `~/.cargo` + `~/.rustup`, or `<prefix>/opt/{cargo,rustup}` with a read-only HOME; wrappers for `cargo`, `rustc`, `rustup`, `rustfmt`, `cargo-clippy`, `clippy-driver`, `rustdoc` in the bin dir set `RUSTUP_HOME`/`CARGO_HOME`, so `<prefix>/bin` on `PATH` is enough; `CARGO_HOME` is named by the link `/opt/cargo` where one can be made, so a `target/` built on another machine with the same link stays fresh |
 | `tailscale` | the Tailscale client, installed only |
 
 Nothing here signs in to anything or reads a secret: credentials don't exist yet when a setup script
